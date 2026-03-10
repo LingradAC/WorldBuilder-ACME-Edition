@@ -885,14 +885,29 @@ namespace WorldBuilder.Editors.Dungeon {
                 }
                 if (_portalWorldVerts.Count < 3) return;
 
+                var polyNormal = Vector3.Zero;
+                if (_portalWorldVerts.Count >= 3) {
+                    var e1 = _portalWorldVerts[1] - _portalWorldVerts[0];
+                    var e2 = _portalWorldVerts[2] - _portalWorldVerts[0];
+                    polyNormal = Vector3.Cross(e1, e2);
+                    if (polyNormal.LengthSquared() > 1e-8f) polyNormal = Vector3.Normalize(polyNormal);
+                }
+
                 for (int i = 0; i < _portalWorldVerts.Count; i++) {
                     int next = (i + 1) % _portalWorldVerts.Count;
                     var a = _portalWorldVerts[i];
                     var b = _portalWorldVerts[next];
-                    var edgeDir = Vector3.Normalize(b - a);
+                    var edgeDir = b - a;
+                    if (edgeDir.LengthSquared() < 1e-8f) continue;
+                    edgeDir = Vector3.Normalize(edgeDir);
                     var mid = (a + b) * 0.5f;
                     var toCamera = Vector3.Normalize(camPos - mid);
-                    var sideDir = Vector3.Normalize(Vector3.Cross(edgeDir, toCamera)) * portalLineWidth;
+                    var cross = Vector3.Cross(edgeDir, toCamera);
+                    var sideDir = cross.LengthSquared() > 1e-6f
+                        ? Vector3.Normalize(cross) * portalLineWidth
+                        : (polyNormal.LengthSquared() > 0.5f
+                            ? Vector3.Normalize(Vector3.Cross(edgeDir, polyNormal)) * portalLineWidth
+                            : Vector3.Normalize(Vector3.Cross(edgeDir, Vector3.UnitZ)) * portalLineWidth);
                     var n = toCamera;
                     void PV(Vector3 p) { verts.Add(p.X); verts.Add(p.Y); verts.Add(p.Z); verts.Add(n.X); verts.Add(n.Y); verts.Add(n.Z); }
                     PV(a - sideDir); PV(b - sideDir); PV(b + sideDir);
@@ -969,8 +984,8 @@ namespace WorldBuilder.Editors.Dungeon {
             _allOpenPortalVerts.Clear();
             _highlightedPortalVerts.Clear();
             var camPos = Camera.Position;
-            float lineWidth = IsInPlacementMode ? 0.25f : 0.15f;
-            float highlightWidth = 0.4f;
+            float lineWidth = IsInPlacementMode ? 0.35f : 0.25f;
+            float highlightWidth = 0.5f;
             bool hasHighlight = HighlightedPortalCellNum != 0 || HighlightedPortalPolyId != 0;
 
             for (int i = 0; i < OpenPortalIndicators.Count; i++) {
@@ -983,18 +998,23 @@ namespace WorldBuilder.Editors.Dungeon {
                 var targetVerts = isHighlighted ? _highlightedPortalVerts : _allOpenPortalVerts;
                 float w = isHighlighted ? highlightWidth : lineWidth;
 
-                var normal = Vector3.Normalize(indicator.Normal);
-                var offset = normal * 0.1f;
+                var portalNormal = Vector3.Normalize(indicator.Normal);
+                var offset = portalNormal * 0.1f;
 
                 for (int v = 0; v < indicator.WorldVertices.Length; v++) {
                     int next = (v + 1) % indicator.WorldVertices.Length;
                     var a = indicator.WorldVertices[v] + offset;
                     var b = indicator.WorldVertices[next] + offset;
 
-                    var edgeDir = Vector3.Normalize(b - a);
+                    var edgeDir = b - a;
+                    if (edgeDir.LengthSquared() < 1e-8f) continue;
+                    edgeDir = Vector3.Normalize(edgeDir);
                     var mid = (a + b) * 0.5f;
                     var toCamera = Vector3.Normalize(camPos - mid);
-                    var sideDir = Vector3.Normalize(Vector3.Cross(edgeDir, toCamera)) * w;
+                    var cross = Vector3.Cross(edgeDir, toCamera);
+                    var sideDir = cross.LengthSquared() > 1e-6f
+                        ? Vector3.Normalize(cross) * w
+                        : Vector3.Normalize(Vector3.Cross(edgeDir, portalNormal)) * w;
                     var n = toCamera;
 
                     void PV(Vector3 p) {
@@ -1033,12 +1053,12 @@ namespace WorldBuilder.Editors.Dungeon {
                 shader.Bind();
                 shader.SetUniform("uViewProjection", viewProjection);
                 shader.SetUniform("uCameraPosition", camPos);
-                shader.SetUniform("uSphereColor", IsInPlacementMode ? new Vector3(0.2f, 1.0f, 0.4f) : new Vector3(0.15f, 0.7f, 0.25f));
+                shader.SetUniform("uSphereColor", IsInPlacementMode ? new Vector3(0.3f, 1.0f, 0.5f) : new Vector3(0.2f, 0.85f, 0.35f));
                 shader.SetUniform("uLightDirection", Vector3.Normalize(new Vector3(0.3f, -0.5f, -0.8f)));
                 shader.SetUniform("uAmbientIntensity", 1.0f);
                 shader.SetUniform("uSpecularPower", 0f);
-                shader.SetUniform("uGlowColor", new Vector3(0f, 0f, 0f));
-                shader.SetUniform("uGlowIntensity", 0f);
+                shader.SetUniform("uGlowColor", IsInPlacementMode ? new Vector3(0f, 0.4f, 0.1f) : new Vector3(0f, 0.2f, 0.05f));
+                shader.SetUniform("uGlowIntensity", IsInPlacementMode ? 0.6f : 0.3f);
                 shader.SetUniform("uGlowPower", 1.0f);
 
                 gl.Disable(EnableCap.DepthTest);
@@ -1096,21 +1116,26 @@ namespace WorldBuilder.Editors.Dungeon {
 
             _connPortalVerts.Clear();
             var camPos = Camera.Position;
-            const float lineWidth = 0.1f;
+            const float lineWidth = 0.18f;
 
             foreach (var indicator in ConnectedPortalIndicators) {
                 if (indicator.WorldVertices == null || indicator.WorldVertices.Length < 3) continue;
-                var normal = Vector3.Normalize(indicator.Normal);
-                var offset = normal * 0.1f;
+                var portalNormal = Vector3.Normalize(indicator.Normal);
+                var offset = portalNormal * 0.1f;
 
                 for (int v = 0; v < indicator.WorldVertices.Length; v++) {
                     int next = (v + 1) % indicator.WorldVertices.Length;
                     var a = indicator.WorldVertices[v] + offset;
                     var b = indicator.WorldVertices[next] + offset;
-                    var edgeDir = Vector3.Normalize(b - a);
+                    var edgeDir = b - a;
+                    if (edgeDir.LengthSquared() < 1e-8f) continue;
+                    edgeDir = Vector3.Normalize(edgeDir);
                     var mid = (a + b) * 0.5f;
                     var toCamera = Vector3.Normalize(camPos - mid);
-                    var sideDir = Vector3.Normalize(Vector3.Cross(edgeDir, toCamera)) * lineWidth;
+                    var cross = Vector3.Cross(edgeDir, toCamera);
+                    var sideDir = cross.LengthSquared() > 1e-6f
+                        ? Vector3.Normalize(cross) * lineWidth
+                        : Vector3.Normalize(Vector3.Cross(edgeDir, portalNormal)) * lineWidth;
                     var n = toCamera;
                     void PV(Vector3 p) {
                         _connPortalVerts.Add(p.X); _connPortalVerts.Add(p.Y); _connPortalVerts.Add(p.Z);
@@ -1146,11 +1171,11 @@ namespace WorldBuilder.Editors.Dungeon {
             shader.Bind();
             shader.SetUniform("uViewProjection", viewProjection);
             shader.SetUniform("uCameraPosition", camPos);
-            shader.SetUniform("uSphereColor", new Vector3(0.3f, 0.5f, 0.9f));
+            shader.SetUniform("uSphereColor", new Vector3(0.35f, 0.55f, 1.0f));
             shader.SetUniform("uLightDirection", Vector3.Normalize(new Vector3(0.3f, -0.5f, -0.8f)));
             shader.SetUniform("uAmbientIntensity", 1.0f);
             shader.SetUniform("uSpecularPower", 0f);
-            shader.SetUniform("uGlowColor", new Vector3(0f, 0f, 0f));
+            shader.SetUniform("uGlowColor", new Vector3(0.1f, 0.15f, 0.4f));
             shader.SetUniform("uGlowIntensity", 0f);
             shader.SetUniform("uGlowPower", 1.0f);
 
@@ -1512,7 +1537,7 @@ namespace WorldBuilder.Editors.Dungeon {
             shader.Bind();
             shader.SetUniform("uViewProjection", viewProjection);
             shader.SetUniform("uCameraPosition", Camera.Position);
-            shader.SetUniform("uSphereColor", new Vector3(0.25f, 0.2f, 0.35f));
+            shader.SetUniform("uSphereColor", new Vector3(0.35f, 0.3f, 0.5f));
             shader.SetUniform("uLightDirection", Vector3.Normalize(new Vector3(0.3f, -0.5f, -0.8f)));
             shader.SetUniform("uAmbientIntensity", 1.0f);
             shader.SetUniform("uSpecularPower", 0f);
@@ -1540,8 +1565,8 @@ namespace WorldBuilder.Editors.Dungeon {
             int halfLines = 15;
             float extent = halfLines * step;
             float z = center.Z;
-            float lineW = 0.04f;
-            float majorW = 0.08f;
+            float lineW = 0.07f;
+            float majorW = 0.14f;
             var camPos = Camera.Position;
 
             var verts = new List<float>();

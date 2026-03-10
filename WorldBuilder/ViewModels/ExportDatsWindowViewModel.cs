@@ -173,6 +173,8 @@ namespace WorldBuilder.ViewModels {
         public async Task Export() {
             if (!Validate()) return;
 
+            Task? progressDialogTask = null;
+
             try {
                 if (!OverwriteFiles) {
                     foreach (var datFile in datFiles) {
@@ -219,13 +221,14 @@ namespace WorldBuilder.ViewModels {
                     }
                 };
 
-                var exportDialogTask = DialogHost.Show(exportProgressDialog, "ExportDialogHost");
+                progressDialogTask = DialogHost.Show(exportProgressDialog, "ExportDialogHost");
 
                 await Task.Run(() => _project.ExportDats(ExportDirectory, PortalIteration, status => {
                     Avalonia.Threading.Dispatcher.UIThread.Post(() => exportStatusText.Text = status);
                 }));
 
-                DialogHost.Close("ExportDialogHost");
+                await CloseDialogHostSafeAsync(progressDialogTask);
+                progressDialogTask = null;
 
                 var successMsg = "DAT files exported successfully!";
                 if (repoResult != null) {
@@ -264,26 +267,47 @@ namespace WorldBuilder.ViewModels {
                 _window.Close();
             }
             catch (Exception ex) {
+                Console.WriteLine($"[Export] Export failed: {ex}");
+                await CloseDialogHostSafeAsync(progressDialogTask);
+
                 DirectoryErrorMessage = $"Export failed: {ex.Message}";
                 HasDirectoryError = true;
 
-                await DialogHost.Show(new StackPanel {
-                    Margin = new Avalonia.Thickness(10),
-                    Spacing = 10,
-                    Children =
-                    {
-                        new TextBlock { Text = $"Export failed: {ex.Message}" },
-                        new Button
+                try {
+                    await DialogHost.Show(new StackPanel {
+                        Margin = new Avalonia.Thickness(10),
+                        Spacing = 10,
+                        Children =
                         {
-                            Content = "OK",
-                            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                            Command = new RelayCommand(() => DialogHost.Close("ExportDialogHost"))
+                            new TextBlock { Text = $"Export failed: {ex.Message}" },
+                            new Button
+                            {
+                                Content = "OK",
+                                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                                Command = new RelayCommand(() => DialogHost.Close("ExportDialogHost"))
+                            }
                         }
-                    }
-                }, "ExportDialogHost");
+                    }, "ExportDialogHost");
+                }
+                catch {
+                    // Error already visible via HasDirectoryError
+                }
             }
             finally {
                 _project.OnExportReposition = null;
+            }
+        }
+
+        private static async Task CloseDialogHostSafeAsync(Task? dialogTask) {
+            bool closed = false;
+            try {
+                DialogHost.Close("ExportDialogHost");
+                closed = true;
+            }
+            catch { }
+
+            if (closed && dialogTask != null) {
+                try { await dialogTask; } catch { }
             }
         }
 

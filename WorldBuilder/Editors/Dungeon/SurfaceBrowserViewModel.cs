@@ -366,7 +366,7 @@ namespace WorldBuilder.Editors.Dungeon {
             return dst;
         }
 
-        private static byte[] DecompressDxt1(byte[] data, int width, int height) {
+        internal static byte[] DecompressDxt1(byte[] data, int width, int height) {
             var rgba = new byte[width * height * 4];
             int blocksW = Math.Max(1, (width + 3) / 4);
             int blocksH = Math.Max(1, (height + 3) / 4);
@@ -409,7 +409,7 @@ namespace WorldBuilder.Editors.Dungeon {
             return rgba;
         }
 
-        private static byte[] DecompressDxt5(byte[] data, int width, int height, bool isDxt3) {
+        internal static byte[] DecompressDxt5(byte[] data, int width, int height, bool isDxt3) {
             var rgba = new byte[width * height * 4];
             int blocksW = Math.Max(1, (width + 3) / 4);
             int blocksH = Math.Max(1, (height + 3) / 4);

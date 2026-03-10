@@ -145,32 +145,55 @@ namespace WorldBuilder.Editors.Dungeon {
 
         /// <summary>
         /// Compute a consistent "up" direction from a portal polygon's vertices.
-        /// Uses the vertical extent of the polygon, falling back to the first edge
-        /// perpendicular to the normal.
+        /// 
+        /// The AC client's portal geometry defines a polygon where edges form the
+        /// doorframe. We find the edge most aligned with world-Z (the vertical edge
+        /// of the doorway) and use its direction as "up". For floor/ceiling portals
+        /// where no edge has a Z component, we fall back to cross-product with world axes.
+        /// 
+        /// This replaces the previous Z-span approach which picked the wrong direction
+        /// when vertices at min/max Z weren't on the same edge (e.g. diamond-shaped portals).
         /// </summary>
         private static Vector3 ComputePortalUp(List<Vector3> vertices, Vector3 normal) {
             if (vertices.Count < 2) return Vector3.UnitZ;
 
-            // Find the vertex span in the Z direction to get a vertical edge
-            float minZ = float.MaxValue, maxZ = float.MinValue;
-            int minZi = 0, maxZi = 0;
+            var n = Vector3.Normalize(normal);
+
+            // Find the polygon edge most aligned with world-Z (vertical).
+            // For a standard wall portal, the vertical edges of the doorframe
+            // define the "up" direction. Using the edge rather than vertex-span
+            // ensures we get a direction that follows actual geometry.
+            Vector3 bestEdge = Vector3.Zero;
+            float bestZAlignment = -1f;
             for (int i = 0; i < vertices.Count; i++) {
-                if (vertices[i].Z < minZ) { minZ = vertices[i].Z; minZi = i; }
-                if (vertices[i].Z > maxZ) { maxZ = vertices[i].Z; maxZi = i; }
+                var a = vertices[i];
+                var b = vertices[(i + 1) % vertices.Count];
+                var edge = b - a;
+                float edgeLen = edge.Length();
+                if (edgeLen < 0.01f) continue;
+
+                var edgeDir = edge / edgeLen;
+                float zAlign = MathF.Abs(edgeDir.Z);
+                if (zAlign > bestZAlignment) {
+                    bestZAlignment = zAlign;
+                    // Ensure consistent direction: always point upward (+Z)
+                    bestEdge = edgeDir.Z >= 0 ? edge : -edge;
+                }
             }
 
             Vector3 up;
-            if (maxZ - minZ > 0.1f) {
-                up = vertices[maxZi] - vertices[minZi];
+            if (bestZAlignment > 0.1f) {
+                up = bestEdge;
             } else {
-                // Flat portal (e.g. floor/ceiling) — use cross product with world forward
-                up = Vector3.Cross(normal, Vector3.UnitX);
+                // Flat portal (floor/ceiling): no edge has significant Z.
+                // Use cross product with a world axis for a consistent reference.
+                up = Vector3.Cross(n, Vector3.UnitX);
                 if (up.LengthSquared() < 0.01f)
-                    up = Vector3.Cross(normal, Vector3.UnitY);
+                    up = Vector3.Cross(n, Vector3.UnitY);
             }
 
-            // Project out the normal component to keep it perpendicular
-            up -= Vector3.Dot(up, Vector3.Normalize(normal)) * Vector3.Normalize(normal);
+            // Project out normal component to stay in the portal plane
+            up -= Vector3.Dot(up, n) * n;
             return up.LengthSquared() > 0.001f ? Vector3.Normalize(up) : Vector3.UnitZ;
         }
 

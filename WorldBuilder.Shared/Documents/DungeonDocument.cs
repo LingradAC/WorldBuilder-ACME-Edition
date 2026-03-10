@@ -148,8 +148,22 @@ namespace WorldBuilder.Shared.Documents {
                 _logger.LogInformation("[DungeonDoc] Auto-computed VisibleCells for {Updated}/{Total} cells before export", updated, Cells.Count);
             }
 
+            // Step 2.6: Ensure portal flags (PortalSide) are correct before export.
+            // The AC client uses portal_side to determine which half-space of the
+            // portal polygon plane is the cell interior. Incorrect values cause
+            // broken rendering and traversal.
+            int flagsFixed = RecomputePortalFlags(datwriter);
+            if (flagsFixed > 0)
+                _logger.LogInformation("[DungeonDoc] Fixed {Count} portal flag(s) before export", flagsFixed);
+
             // Step 3: Save all EnvCells
             var envCells = ToEnvCells(forDatExport: true);
+            SanitizePortalTopologyForExport(datwriter, envCells);
+            SanitizeEnvCellSurfacesForExport(datwriter, envCells);
+            SanitizeEnvCellStaticsForExport(datwriter, envCells);
+            ReorderCellPortalsToMatchCellStruct(datwriter, envCells);
+            RewriteOtherPortalIndices(envCells);
+            PopulateVisibilityStabs(envCells);
             int saved = 0;
             foreach (var envCell in envCells) {
                 if (!datwriter.TrySave(envCell, iteration)) {
@@ -159,7 +173,10 @@ namespace WorldBuilder.Shared.Documents {
                 saved++;
             }
 
-            // Step 4: Update NumCells on the LBI (preserves existing Buildings/Objects)
+            // Step 4: Update NumCells and add dungeon BuildingInfo to the LBI.
+            // Original dungeons have buildings=0 in their LBI. Cell visibility is handled
+            // through the EnvCell VisibleCells list (light_list.data in the client),
+            // not through BuildingInfo/BuildingPortal stab lists.
             var maxCellNum = Cells.Max(c => c.CellNumber);
             lbi.NumCells = (uint)(maxCellNum - 0x00FF);
 
@@ -176,19 +193,487 @@ namespace WorldBuilder.Shared.Documents {
                 lbiId, isNewLbi, prevNumCells, lbi.NumCells, existingBuildings, existingObjects,
                 lbEntryId, hasLandBlock);
 
+            // Diagnostic: compare with a known original dungeon's LBI and cell
+            uint refLbiId = 0x01D9FFFE;
+            if (datwriter.TryGet<LandBlockInfo>(refLbiId, out var refLbi)) {
+                string bldgInfo = "";
+                if (refLbi.Buildings?.Count > 0) {
+                    var b = refLbi.Buildings[0];
+                    string portalInfo = "";
+                    if (b.Portals?.Count > 0) {
+                        var p = b.Portals[0];
+                        var refStabs = p.StabList.Take(5).Select(s => $"0x{s:X4}");
+                        portalInfo = $" portal0=[other=0x{p.OtherCellId:X4},otherP={p.OtherPortalId},flags={p.Flags},stabs={p.StabList.Count} ids=[{string.Join(",", refStabs)}]]";
+                    }
+                    bldgInfo = $" bldg0=[model=0x{b.ModelId:X8},leaves={b.NumLeaves},portals={b.Portals?.Count ?? 0}{portalInfo}]";
+                }
+                _logger.LogInformation(
+                    "[DungeonDoc] REFERENCE LBI 0x{Id:X8}: numCells={NC}, buildings={BC}, objects={OC}{BldgInfo}",
+                    refLbiId, refLbi.NumCells, refLbi.Buildings?.Count ?? 0, refLbi.Objects?.Count ?? 0, bldgInfo);
+            }
+
+            // Binary format diagnostic: pack a reference cell and compare sizes
+            // to detect any field width mismatches between DatReaderWriter and the client
+            uint refCellId = 0x01D90100;
+            if (datwriter.TryGet<EnvCell>(refCellId, out var refCell)) {
+                int rawSize = -1;
+
+                // Pack via DatReaderWriter and measure size
+                var packBuf = new byte[8192];
+                var packWriter = new DatReaderWriter.Lib.IO.DatBinWriter(packBuf);
+                refCell.Pack(packWriter);
+                int drwSize = packWriter.Offset;
+
+                // Calculate expected client size manually:
+                // Header: 4(id)
+                // Flags: 4, CellId: 4, numSurf: 1, numPort: 1, numVis: 2
+                // Surfaces: 2*n, EnvId: 2, CellStruct: ?, Frame: 28
+                // Portals: 8*n, VisCells: 2*n
+                // Stabs (if flag 0x2): 4 + 32*n
+                // RestrictionObj (if flag 0x8): 4
+                int nSurf = refCell.Surfaces.Count;
+                int nPort = refCell.CellPortals.Count;
+                int nVis = refCell.VisibleCells.Count;
+                int nStab = refCell.StaticObjects.Count;
+                bool hasStabs = ((uint)refCell.Flags & 2) != 0;
+                bool hasRestrict = ((uint)refCell.Flags & 8) != 0;
+
+                int expectedWith2 = 4 + 4 + 4 + 1 + 1 + 2 + (2 * nSurf) + 2 + 2 + 28 +
+                    (8 * nPort) + (2 * nVis) +
+                    (hasStabs ? 4 + (32 * nStab) : 0) +
+                    (hasRestrict ? 4 : 0);
+                int expectedWith1 = expectedWith2 - 1;
+
+                _logger.LogInformation(
+                    "[DungeonDoc] BINARY FORMAT TEST cell 0x{Id:X8}: rawDatSize={Raw}, drwPackSize={DRW}, " +
+                    "expectedWith2ByteCS={Exp2}, expectedWith1ByteCS={Exp1} " +
+                    "(surfaces={S}, portals={P}, visCells={V}, stabs={St}, flags=0x{F:X})",
+                    refCellId, rawSize, drwSize, expectedWith2, expectedWith1,
+                    nSurf, nPort, nVis, nStab, (uint)refCell.Flags);
+            }
+
             // Verify: read back first cell and LBI to confirm persistence
             uint firstCellId = (lbId << 16) | 0x0100;
             bool cellOk = datwriter.TryGet<EnvCell>(firstCellId, out var verifyCell);
             bool lbiOk = datwriter.TryGet<LandBlockInfo>(lbiId, out var verifyLbi);
+            int verifyStabs = cellOk ? verifyCell!.StaticObjects?.Count ?? 0 : 0;
+            int verifyPortals = cellOk ? verifyCell!.CellPortals?.Count ?? 0 : 0;
+            int verifyVis = cellOk ? verifyCell!.VisibleCells?.Count ?? 0 : 0;
+            uint verifyFlags = cellOk ? (uint)verifyCell!.Flags : 0;
+            string stabSample = "";
+            if (cellOk && verifyCell!.StaticObjects?.Count > 0) {
+                var first3 = verifyCell.StaticObjects.Take(3).Select(s => $"0x{s.Id:X8}");
+                stabSample = $" stabIds=[{string.Join(",", first3)}]";
+            }
+            string ourPortalSample = "";
+            if (cellOk && verifyCell!.CellPortals?.Count > 0) {
+                var pSample = verifyCell.CellPortals.Take(3).Select(p =>
+                    $"poly={p.PolygonId}→cell=0x{p.OtherCellId:X4},otherP={p.OtherPortalId},flags={p.Flags}");
+                ourPortalSample = $" portals=[{string.Join(" | ", pSample)}]";
+            }
             _logger.LogInformation(
-                "[DungeonDoc] Verify LB {LB:X4}: cell 0x{CellId:X8} exists={CellOk} (env=0x{Env:X4}), " +
+                "[DungeonDoc] Verify LB {LB:X4}: cell 0x{CellId:X8} exists={CellOk} (env=0x{Env:X4}, " +
+                "flags=0x{Flags:X}, portals={Portals}, visCells={Vis}, stabs={Stabs}{StabSample}{PortalSample}), " +
                 "LBI exists={LbiOk} (numCells={Num})",
                 LandblockKey, firstCellId, cellOk,
                 cellOk ? verifyCell!.EnvironmentId : 0,
+                verifyFlags, verifyPortals, verifyVis, verifyStabs, stabSample, ourPortalSample,
                 lbiOk,
                 lbiOk ? verifyLbi!.NumCells : 0);
 
+            // Verify second cell exists and log VisibleCells for first cell
+            uint secondCellId = (lbId << 16) | 0x0101;
+            bool cell2Ok = datwriter.TryGet<EnvCell>(secondCellId, out var verifyCell2);
+            string visListStr = "";
+            if (cellOk && verifyCell!.VisibleCells?.Count > 0) {
+                visListStr = string.Join(",", verifyCell.VisibleCells.Select(v => $"0x{v:X4}"));
+            }
+            _logger.LogInformation(
+                "[DungeonDoc] Cell2 0x{Id:X8} exists={Ok} (env=0x{Env:X4}, portals={P}), " +
+                "Cell1 visCells=[{VisList}]",
+                secondCellId, cell2Ok,
+                cell2Ok ? verifyCell2!.EnvironmentId : 0,
+                cell2Ok ? verifyCell2!.CellPortals?.Count ?? 0 : 0,
+                visListStr);
+
             return Task.FromResult(true);
+        }
+
+        private void SanitizeEnvCellSurfacesForExport(IDatReaderWriter datwriter, List<EnvCell> envCells) {
+            uint? fallbackSurfaceId = ResolveFallbackSurfaceId(datwriter);
+            if (!fallbackSurfaceId.HasValue) {
+                _logger.LogWarning("[DungeonDoc] Surface sanitizer: no valid fallback surface found; leaving surfaces unchanged");
+                return;
+            }
+
+            int filledEmpty = 0;
+            int mismatchObserved = 0;
+
+            foreach (var envCell in envCells) {
+                int requiredSlots = GetRequiredSurfaceSlots(datwriter, envCell.EnvironmentId, envCell.CellStructure);
+
+                // Conservative export fix: only fill truly empty surface lists.
+                // Existing per-cell surface values may be valid runtime references
+                // even when they do not resolve through the simple Surface chain check.
+                if (requiredSlots > 0 && envCell.Surfaces.Count == 0) {
+                    envCell.Surfaces.AddRange(Enumerable.Repeat((ushort)fallbackSurfaceId.Value, requiredSlots));
+                    filledEmpty++;
+                }
+                else if (requiredSlots > 0 && envCell.Surfaces.Count != requiredSlots) {
+                    mismatchObserved++;
+                }
+            }
+
+            if (filledEmpty > 0 || mismatchObserved > 0) {
+                _logger.LogInformation(
+                    "[DungeonDoc] Surface sanitizer: filled {FilledEmpty} empty surface list(s); observed {Mismatches} non-empty slot-count mismatch(es) (left unchanged)",
+                    filledEmpty, mismatchObserved);
+            }
+        }
+
+        private static int GetRequiredSurfaceSlots(IDatReaderWriter dats, ushort envId, ushort cellStruct) {
+            uint envFileId = (uint)(envId | 0x0D000000);
+            if (!dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) return 0;
+            if (!env.Cells.TryGetValue(cellStruct, out var cs)) return 0;
+
+            var portalIds = cs.Portals != null ? new HashSet<ushort>(cs.Portals) : new HashSet<ushort>();
+            int maxIndex = -1;
+            foreach (var kvp in cs.Polygons) {
+                if (portalIds.Contains(kvp.Key)) continue;
+                if (kvp.Value.PosSurface > maxIndex) maxIndex = kvp.Value.PosSurface;
+            }
+            return maxIndex + 1;
+        }
+
+        private static uint? ResolveFallbackSurfaceId(IDatReaderWriter dats) {
+            // Prefer the historical dungeon fallback.
+            const uint preferred = 0x032A;
+            if (dats.TryGet<Surface>(preferred, out _)) return preferred;
+
+            foreach (var id in dats.Dats.Portal.GetAllIdsOfType<Surface>()) {
+                if (dats.TryGet<Surface>(id, out _))
+                    return id;
+            }
+            return null;
+        }
+
+        private void SanitizeEnvCellStaticsForExport(IDatReaderWriter datwriter, List<EnvCell> envCells) {
+            int removed = 0;
+            foreach (var envCell in envCells) {
+                if (envCell.StaticObjects == null || envCell.StaticObjects.Count == 0) continue;
+                int before = envCell.StaticObjects.Count;
+                envCell.StaticObjects.RemoveAll(stab => !datwriter.TryGet<Setup>(stab.Id, out _));
+                removed += before - envCell.StaticObjects.Count;
+            }
+
+            if (removed > 0) {
+                _logger.LogWarning("[DungeonDoc] Static sanitizer removed {Removed} invalid stab reference(s) before export", removed);
+            }
+        }
+
+        private void SanitizePortalTopologyForExport(IDatReaderWriter datwriter, List<EnvCell> envCells) {
+            var byId = envCells.ToDictionary(c => c.Id, c => c);
+            var validPortalPolys = new Dictionary<uint, HashSet<ushort>>();
+            var validAllPolys = new Dictionary<uint, HashSet<ushort>>();
+
+            int removedInvalidPoly = 0;
+            int removedDuplicate = 0;
+            int removedDangling = 0;
+            int fixedBacklinks = 0;
+
+            (HashSet<ushort> portalPolys, HashSet<ushort> allPolys) getPolySets(EnvCell cell) {
+                if (validPortalPolys.TryGetValue(cell.Id, out var cachedPortal) &&
+                    validAllPolys.TryGetValue(cell.Id, out var cachedAll)) {
+                    return (cachedPortal, cachedAll);
+                }
+
+                uint envFileId = (uint)(cell.EnvironmentId | 0x0D000000);
+                var portalSet = new HashSet<ushort>();
+                var allSet = new HashSet<ushort>();
+                if (datwriter.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env) &&
+                    env.Cells.TryGetValue(cell.CellStructure, out var cs)) {
+                    if (cs.Portals != null) {
+                        foreach (var p in cs.Portals)
+                            portalSet.Add(p);
+                    }
+                    if (cs.Polygons != null) {
+                        foreach (var p in cs.Polygons.Keys)
+                            allSet.Add(p);
+                    }
+                }
+                validPortalPolys[cell.Id] = portalSet;
+                validAllPolys[cell.Id] = allSet;
+                return (portalSet, allSet);
+            }
+
+            foreach (var cell in envCells) {
+                var (portalPolys, allPolys) = getPolySets(cell);
+                var seenPoly = new HashSet<ushort>();
+                var sanitized = new List<CellPortal>(cell.CellPortals.Count);
+                foreach (var cp in cell.CellPortals) {
+                    ushort poly = (ushort)cp.PolygonId;
+                    if (!allPolys.Contains(poly) || !portalPolys.Contains(poly)) {
+                        removedInvalidPoly++;
+                        continue;
+                    }
+                    if (!seenPoly.Add(poly)) {
+                        removedDuplicate++;
+                        continue;
+                    }
+                    uint otherId = (cell.Id & 0xFFFF0000u) | cp.OtherCellId;
+                    if (!byId.ContainsKey(otherId)) {
+                        removedDangling++;
+                        continue;
+                    }
+                    sanitized.Add(cp);
+                }
+                cell.CellPortals.Clear();
+                cell.CellPortals.AddRange(sanitized);
+            }
+
+            // Ensure reciprocal portal links exist and are valid.
+            foreach (var cell in envCells) {
+                foreach (var cp in cell.CellPortals.ToList()) {
+                    uint otherId = (cell.Id & 0xFFFF0000u) | cp.OtherCellId;
+                    if (!byId.TryGetValue(otherId, out var otherCell)) continue;
+
+                    ushort otherPoly = (ushort)cp.OtherPortalId;
+                    var (otherPortalPolys, otherAllPolys) = getPolySets(otherCell);
+                    if (!otherAllPolys.Contains(otherPoly) || !otherPortalPolys.Contains(otherPoly))
+                        continue;
+
+                    bool hasBack = otherCell.CellPortals.Any(p =>
+                        p.OtherCellId == (ushort)(cell.Id & 0xFFFF) &&
+                        (ushort)p.PolygonId == otherPoly &&
+                        (ushort)p.OtherPortalId == (ushort)cp.PolygonId);
+                    if (hasBack) continue;
+
+                    // If polygon slot already used on other cell, do not force conflicting backlink.
+                    bool otherPolyUsed = otherCell.CellPortals.Any(p => (ushort)p.PolygonId == otherPoly);
+                    if (otherPolyUsed) continue;
+
+                    otherCell.CellPortals.Add(new CellPortal {
+                        OtherCellId = (ushort)(cell.Id & 0xFFFF),
+                        PolygonId = otherPoly,
+                        OtherPortalId = cp.PolygonId,
+                        Flags = cp.Flags
+                    });
+                    fixedBacklinks++;
+                }
+            }
+
+            if (removedInvalidPoly > 0 || removedDuplicate > 0 || removedDangling > 0 || fixedBacklinks > 0) {
+                _logger.LogWarning(
+                    "[DungeonDoc] Portal sanitizer: removed invalidPoly={InvalidPoly}, duplicate={Duplicate}, dangling={Dangling}; addedBacklinks={Backlinks}",
+                    removedInvalidPoly, removedDuplicate, removedDangling, fixedBacklinks);
+            }
+        }
+
+        /// <summary>
+        /// Populates each EnvCell's StaticObjects (stab section, flag 0x2) with visibility
+        /// entries so the AC client can preload adjacent cells for portal rendering.
+        ///
+        /// The client's CEnvCell::grab_visible_cells iterates the stab_list (StaticObjects
+        /// section) and calls add_visible_cell(stab_list[i]) for each entry. This populates
+        /// the visible_cell_table used by GetVisible(), which GetOtherCell() uses to resolve
+        /// portal targets. Without stab entries, GetVisible returns NULL for all adjacent
+        /// cells and every portal renders as a black void.
+        ///
+        /// Each visibility entry is a Stab with Id = full 32-bit cell ID and
+        /// Frame = the referenced cell's position. The client tolerates non-cell IDs
+        /// (they silently fail to load), so actual static objects can coexist.
+        /// </summary>
+        private void PopulateVisibilityStabs(List<EnvCell> envCells) {
+            var cellPositions = envCells.ToDictionary(c => c.Id, c => c.Position);
+            int totalAdded = 0;
+
+            foreach (var cell in envCells) {
+                uint blockMask = cell.Id & 0xFFFF0000u;
+                var existingIds = new HashSet<uint>(cell.StaticObjects.Select(s => s.Id));
+
+                foreach (var visibleCellNum in cell.VisibleCells) {
+                    uint fullCellId = blockMask | visibleCellNum;
+                    if (fullCellId == cell.Id) continue;
+                    if (existingIds.Contains(fullCellId)) continue;
+
+                    if (!cellPositions.TryGetValue(fullCellId, out var pos))
+                        pos = new Frame();
+
+                    cell.StaticObjects.Add(new Stab {
+                        Id = fullCellId,
+                        Frame = pos
+                    });
+                    totalAdded++;
+                }
+
+                if (cell.StaticObjects.Count > 0)
+                    cell.Flags |= EnvCellFlags.HasStaticObjs;
+            }
+
+            if (totalAdded > 0) {
+                _logger.LogInformation(
+                    "[DungeonDoc] Visibility stabs: added {Count} cell-ID stab(s) for portal rendering preload",
+                    totalAdded);
+            }
+        }
+
+        /// <summary>
+        /// Reorders each EnvCell's CellPortals to match the CellStruct.Portals ordering
+        /// from the Environment file, and pads with placeholder entries for unconnected portals.
+        ///
+        /// The AC client's PView rendering loop iterates CellStruct portal polygons and
+        /// EnvCell CellPortals in lockstep by array index. CellPortals[i] must correspond
+        /// to CellStruct.Portals[i]. If the ordering doesn't match, the BSP portal
+        /// visibility check pairs with the wrong CellPortal, causing portals to render
+        /// as black voids.
+        ///
+        /// Must run BEFORE RewriteOtherPortalIndices (since this changes CellPortal ordering).
+        /// </summary>
+        private void ReorderCellPortalsToMatchCellStruct(IDatReaderWriter dats, List<EnvCell> envCells) {
+            int reordered = 0;
+            int padded = 0;
+
+            foreach (var cell in envCells) {
+                uint envFileId = (uint)(cell.EnvironmentId | 0x0D000000);
+                if (!dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
+                if (!env.Cells.TryGetValue(cell.CellStructure, out var cs)) continue;
+                if (cs.Portals == null || cs.Portals.Count == 0) continue;
+
+                // CellStruct.Portals may contain raw indices OR polygon IDs depending
+                // on how DatReaderWriter unpacked. Resolve to polygon IDs consistently.
+                var resolvedPortalIds = ResolvePortalPolygonIds(cs);
+
+                var portalsByPoly = new Dictionary<ushort, CellPortal>();
+                foreach (var cp in cell.CellPortals) {
+                    portalsByPoly.TryAdd((ushort)cp.PolygonId, cp);
+                }
+
+                var ordered = new List<CellPortal>(resolvedPortalIds.Count);
+                bool needsReorder = false;
+
+                for (int i = 0; i < resolvedPortalIds.Count; i++) {
+                    ushort polyId = resolvedPortalIds[i];
+                    if (portalsByPoly.TryGetValue(polyId, out var existing)) {
+                        ordered.Add(existing);
+                        if (i < cell.CellPortals.Count && (ushort)cell.CellPortals[i].PolygonId != polyId)
+                            needsReorder = true;
+                    }
+                    else {
+                        ordered.Add(new CellPortal {
+                            PolygonId = polyId,
+                            OtherCellId = 0xFFFF,
+                            OtherPortalId = 0xFFFF,
+                            Flags = 0
+                        });
+                        padded++;
+                        needsReorder = true;
+                    }
+                }
+
+                if (!needsReorder && ordered.Count == cell.CellPortals.Count)
+                    continue;
+
+                cell.CellPortals.Clear();
+                cell.CellPortals.AddRange(ordered);
+                reordered++;
+            }
+
+            if (reordered > 0 || padded > 0) {
+                _logger.LogInformation(
+                    "[DungeonDoc] Portal ordering: reordered {Reordered} cell(s) to match CellStruct.Portals, added {Padded} placeholder(s) for unconnected portals",
+                    reordered, padded);
+            }
+        }
+
+        /// <summary>
+        /// Resolve CellStruct.Portals entries to polygon IDs. The DAT stores indices into
+        /// the polygon array, but DatReaderWriter may expose them as raw values or resolved IDs.
+        /// This handles both cases, matching PortalSnapper.GetPortalPolygonIds logic.
+        /// </summary>
+        private static List<ushort> ResolvePortalPolygonIds(DatReaderWriter.Types.CellStruct cs) {
+            if (cs.Portals == null || cs.Portals.Count == 0)
+                return new List<ushort>();
+
+            ushort[]? sortedPolyKeys = null;
+            var result = new List<ushort>(cs.Portals.Count);
+
+            foreach (var portalRef in cs.Portals) {
+                ushort resolvedId = portalRef;
+                if (!cs.Polygons.ContainsKey(resolvedId)) {
+                    if (sortedPolyKeys == null)
+                        sortedPolyKeys = cs.Polygons.Keys.OrderBy(k => k).ToArray();
+                    int idx = portalRef;
+                    if (idx >= 0 && idx < sortedPolyKeys.Length)
+                        resolvedId = sortedPolyKeys[idx];
+                }
+                result.Add(resolvedId);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Rewrites CellPortal.OtherPortalId from polygon IDs to portal array indices.
+        /// The AC client uses other_portal_id as a direct array index into the other
+        /// cell's portals[] array (see PView::OtherPortalClip, CEnvCell::check_building_transit).
+        /// ConnectPortals and SanitizePortalTopologyForExport store polygon IDs in this
+        /// field, which causes out-of-bounds crashes when the polygon ID exceeds the
+        /// portal count. This method must run after all portal additions/removals are final.
+        /// </summary>
+        private void RewriteOtherPortalIndices(List<EnvCell> envCells) {
+            var byId = envCells.ToDictionary(c => c.Id, c => c);
+            int rewritten = 0;
+            int clamped = 0;
+
+            foreach (var cell in envCells) {
+                ushort cellNum = (ushort)(cell.Id & 0xFFFF);
+
+                foreach (var cp in cell.CellPortals) {
+                    if (cp.OtherCellId == 0xFFFF) continue;
+                    uint otherFullId = (cell.Id & 0xFFFF0000u) | cp.OtherCellId;
+                    if (!byId.TryGetValue(otherFullId, out var otherCell)) continue;
+
+                    int bestIndex = -1;
+                    int backlinksFound = 0;
+
+                    for (int j = 0; j < otherCell.CellPortals.Count; j++) {
+                        if (otherCell.CellPortals[j].OtherCellId != cellNum) continue;
+                        backlinksFound++;
+
+                        if (backlinksFound == 1)
+                            bestIndex = j;
+
+                        if ((ushort)otherCell.CellPortals[j].PolygonId == cp.OtherPortalId) {
+                            bestIndex = j;
+                            break;
+                        }
+                    }
+
+                    if (bestIndex >= 0) {
+                        if (cp.OtherPortalId != (ushort)bestIndex) {
+                            cp.OtherPortalId = (ushort)bestIndex;
+                            rewritten++;
+                        }
+                    } else {
+                        // No backlink found — clamp to 0 to prevent out-of-bounds crash.
+                        // The client uses OtherPortalId as a direct array index into the
+                        // other cell's portals[]; leaving it as a polygon ID (e.g. 31)
+                        // when the other cell has only 2 portals causes a crash.
+                        if (otherCell.CellPortals.Count > 0) {
+                            cp.OtherPortalId = 0;
+                        }
+                        _logger.LogWarning(
+                            "[DungeonDoc] Portal index rewriter: no backlink found for cell 0x{CellId:X4} → 0x{OtherId:X4} (poly {Poly}), clamped OtherPortalId to 0",
+                            cellNum, cp.OtherCellId, (ushort)cp.PolygonId);
+                        clamped++;
+                    }
+                }
+            }
+
+            if (rewritten > 0 || clamped > 0) {
+                _logger.LogInformation(
+                    "[DungeonDoc] Portal index rewriter: fixed {Count} OtherPortalId value(s) (polygon ID → array index), clamped {Clamped} missing backlink(s)",
+                    rewritten, clamped);
+            }
         }
 
         /// <summary>
@@ -302,13 +787,16 @@ namespace WorldBuilder.Shared.Documents {
             MarkDirty();
         }
 
+        // NOTE: We intentionally preserve authored dungeon coordinates on export.
+        // No export-time depth remapping is applied.
+
         /// <summary>
-        /// AC dungeon depth formula: world_z = -blockY * DungeonZScale + origin_z.
-        /// High blockY pushes dungeons far underground (e.g. 0x01D9 -> ~-3000).
-        /// Max safe depth is -255; we add this offset so exported dungeons stay above that.
+        /// Legacy hook kept for compatibility with telemetry/manifest callers.
+        /// Export-depth correction is disabled to match retail-authored behavior.
         /// </summary>
-        private const float DungeonZScale = 14f;
-        private const float MaxDungeonDepth = -255f;
+        public float ComputeDatExportZLift() {
+            return 0f;
+        }
 
         /// <summary>Convert all document cells to EnvCell objects for rendering or DAT export.</summary>
         public List<EnvCell> ToEnvCells(bool forDatExport = false) {

@@ -783,6 +783,71 @@ namespace WorldBuilder.Editors.Dungeon {
             if (Selection.SelectedCell != null) SelectCell(Selection.SelectedCell);
         }
 
+        [RelayCommand]
+        private void CapPortal(PortalListEntry? entry) {
+            if (entry == null || !entry.IsOpen || _document == null || _dats == null) return;
+            var cappingService = CreateCappingService();
+            if (cappingService == null) { StatusText = "Knowledge base not loaded"; return; }
+
+            var result = cappingService.CapPortal(entry.OwnerCellNum, entry.PolygonId);
+            if (result != null) {
+                EditingContext.CommandHistory.Record(result);
+                RefreshRendering();
+                if (Selection.SelectedCell != null) SelectCell(Selection.SelectedCell);
+                StatusText = $"Capped portal with dead-end room";
+            }
+            else {
+                StatusText = "No compatible dead-end room found for this portal";
+            }
+        }
+
+        [RelayCommand]
+        private void FilterPaletteForPortal(PortalListEntry? entry) {
+            if (entry == null || !entry.IsOpen || RoomPalette == null) return;
+            var singlePortal = new List<(ushort envId, ushort cs, ushort polyId)> {
+                (entry.OwnerEnvId, entry.OwnerCellStruct, entry.PolygonId)
+            };
+            RoomPalette.SetActiveOpenPortals(singlePortal);
+            RoomPalette.ShowCompatibleOnly = true;
+            StatusText = $"Palette filtered to portal — {entry.CompatibleCount} compatible pieces";
+        }
+
+        [RelayCommand]
+        private async Task CapAllOpenPortals() {
+            if (_document == null || _dats == null) return;
+            var cappingService = CreateCappingService();
+            if (cappingService == null) { StatusText = "Knowledge base not loaded"; return; }
+
+            StatusText = "Capping open portals...";
+            var (sealed_, failed, composite) = await Task.Run(() => cappingService.CapAllOpenPortals());
+
+            if (composite != null) {
+                EditingContext.CommandHistory.Record(composite);
+                RefreshRendering();
+                if (Selection.SelectedCell != null) SelectCell(Selection.SelectedCell);
+            }
+            StatusText = sealed_ > 0
+                ? $"Sealed {sealed_} open portal{(sealed_ != 1 ? "s" : "")} with dead-end rooms" + (failed > 0 ? $" ({failed} could not be capped)" : "")
+                : "No open portals could be capped";
+        }
+
+        private DungeonCappingService? CreateCappingService() {
+            if (_document == null || _dats == null) return null;
+            var kb = DungeonKnowledgeBuilder.LoadCached();
+            if (kb == null || kb.DeadEndIndex.Count == 0) return null;
+
+            var portalIndex = EditingContext.PortalIndex;
+            if (portalIndex == null) {
+                portalIndex = PortalCompatibilityIndex.Build(kb);
+                EditingContext.PortalIndex = portalIndex;
+                RoomPalette.PortalIndex = portalIndex;
+            }
+            var geoCache = EditingContext.GeometryCache ?? new PortalGeometryCache(_dats);
+            EditingContext.GeometryCache = geoCache;
+
+            return new DungeonCappingService(_document, _dats, kb, portalIndex, geoCache);
+        }
+
         private void UpdateConnectedNeighborHighlights() {
             if (_scene == null || _document == null) return;
             var neighborNums = Selection.GetConnectedNeighborCellNums();
@@ -993,23 +1058,18 @@ namespace WorldBuilder.Editors.Dungeon {
 
             if (prefab == null) {
                 _scene.ClearPreview();
+                _scene.PreviewIsSnapped = false;
                 return;
             }
 
-            var previewOrigin = Vector3.Zero;
-            if (_document != null && _document.Cells.Count > 0) {
-                float avgX = _document.Cells.Average(c => c.Origin.X);
-                float avgY = _document.Cells.Average(c => c.Origin.Y);
-                float avgZ = _document.Cells.Average(c => c.Origin.Z);
-                previewOrigin = new Vector3(avgX + 30f, avgY, avgZ);
-            }
-
-            var previewCells = EditingContext.BuildPrefabEnvCells(prefab, previewOrigin, Quaternion.Identity);
+            var (previewOrigin, previewRot, snapped) = ComputeHoverPreviewTransform(prefab);
+            var previewCells = EditingContext.BuildPrefabEnvCells(prefab, previewOrigin, previewRot);
+            _scene.PreviewIsSnapped = snapped;
 
             if (previewCells.Count > 0) {
                 _scene.PreviewEnvCells = previewCells;
 
-                if (!_hoverCameraFocused) {
+                if (!_hoverCameraFocused && !snapped) {
                     var worldOrigin = previewCells[0].Position.Origin;
                     uint lbId = _document?.LandblockKey ?? 0;
                     float bx = ((lbId >> 8) & 0xFF) * 192f;
@@ -1020,6 +1080,70 @@ namespace WorldBuilder.Editors.Dungeon {
                     _hoverCameraFocused = true;
                 }
             }
+        }
+
+        /// <summary>
+        /// For hover preview: try to snap the prefab to the first compatible open portal
+        /// so the user sees exactly how it would look connected. Falls back to an offset
+        /// position next to the dungeon if no compatible portal is found.
+        /// </summary>
+        private (Vector3 origin, Quaternion rotation, bool snapped) ComputeHoverPreviewTransform(DungeonPrefab prefab) {
+            if (_document == null || _document.Cells.Count == 0 || _dats == null)
+                return (Vector3.Zero, Quaternion.Identity, false);
+
+            if (EditingContext.PortalIndex != null && prefab.OpenFaces.Count > 0) {
+                foreach (var dc in _document.Cells) {
+                    uint envFileId = (uint)(dc.EnvironmentId | 0x0D000000);
+                    if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
+                    if (!env.Cells.TryGetValue(dc.CellStructure, out var cs)) continue;
+
+                    var allPortals = PortalSnapper.GetPortalPolygonIds(cs);
+                    var connected = new HashSet<ushort>(dc.CellPortals.Select(cp => cp.PolygonId));
+
+                    foreach (var pid in allPortals) {
+                        if (connected.Contains(pid)) continue;
+
+                        foreach (var of in prefab.OpenFaces) {
+                            var match = EditingContext.PortalIndex.FindMatch(
+                                dc.EnvironmentId, dc.CellStructure, pid,
+                                of.EnvId, of.CellStruct);
+                            if (match == null) continue;
+
+                            var snapOrigin = dc.Origin + Vector3.Transform(match.RelOffset, dc.Orientation);
+                            var snapRot = Quaternion.Normalize(dc.Orientation * match.RelRot);
+                            return (snapOrigin, snapRot, true);
+                        }
+
+                        // Geometric fallback for the first open face
+                        var targetGeom = PortalSnapper.GetPortalGeometry(cs, pid);
+                        if (targetGeom == null) continue;
+                        var (centroid, normal) = PortalSnapper.TransformPortalToWorld(
+                            targetGeom.Value, dc.Origin, dc.Orientation);
+
+                        var firstFace = prefab.OpenFaces[0];
+                        uint pfEnvFileId = (uint)(firstFace.EnvId | 0x0D000000);
+                        if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(pfEnvFileId, out var pfEnv)) continue;
+                        if (!pfEnv.Cells.TryGetValue(firstFace.CellStruct, out var pfCS)) continue;
+
+                        var srcGeom = PortalSnapper.GetPortalGeometry(pfCS, firstFace.PolyId);
+                        if (srcGeom == null) continue;
+
+                        if (EditingContext.GeometryCache != null &&
+                            !EditingContext.GeometryCache.AreCompatible(
+                                dc.EnvironmentId, dc.CellStructure, pid,
+                                firstFace.EnvId, firstFace.CellStruct, firstFace.PolyId))
+                            continue;
+
+                        var (geoOrigin, geoRot) = PortalSnapper.ComputeSnapTransform(centroid, normal, srcGeom.Value);
+                        return (geoOrigin, geoRot, true);
+                    }
+                }
+            }
+
+            float avgX = _document.Cells.Average(c => c.Origin.X);
+            float avgY = _document.Cells.Average(c => c.Origin.Y);
+            float avgZ = _document.Cells.Average(c => c.Origin.Z);
+            return (new Vector3(avgX + 30f, avgY, avgZ), Quaternion.Identity, false);
         }
 
         private void OnPrefabSelected(object? sender, DungeonPrefab prefab) {
@@ -1258,7 +1382,7 @@ namespace WorldBuilder.Editors.Dungeon {
             if (result == null) return;
 
             var modeLabel = result.UseFavoritesOnly ? "favorites-only" : result.Style;
-            StatusText = $"Generating {result.RoomCount}-room {modeLabel} dungeon...";
+            StatusText = $"Generating {result.RoomCount}-size {modeLabel} dungeon...";
             try {
                 ushort lbKey = _loadedLandblockKey != 0 ? _loadedLandblockKey : (ushort)0xFFFF;
                 if (_document == null) {
@@ -1290,16 +1414,19 @@ namespace WorldBuilder.Editors.Dungeon {
                 int valErrors = validationResults?.Count(r => r.Severity == DungeonDocument.ValidationSeverity.Error) ?? 0;
                 int valWarnings = validationResults?.Count(r => r.Severity == DungeonDocument.ValidationSeverity.Warning) ?? 0;
 
+                var branchLabels = new[] { "linear", "moderate", "heavy" };
+                var sizeLabels = new[] { "small rooms", "mixed", "large rooms" };
                 var opts = new List<string>();
                 if (result.UseFavoritesOnly) opts.Add("favorites");
-                if (result.RequireRoof) opts.Add("roofed");
                 if (!result.AllowVertical) opts.Add("no vertical");
                 if (result.LockStyle) opts.Add("style-locked");
+                opts.Add(branchLabels[Math.Clamp(result.Branching, 0, 2)]);
+                opts.Add(sizeLabels[Math.Clamp(result.RoomSize, 0, 2)]);
                 var optsStr = opts.Count > 0 ? $" [{string.Join(", ", opts)}]" : "";
                 var valStr = valErrors > 0 ? $"  ({valErrors} errors, {valWarnings} warnings — run Validate)"
                            : valWarnings > 0 ? $"  ({valWarnings} warnings)"
                            : "";
-                StatusText = $"Generated {CellCount} rooms ({openPortals} open doorways){optsStr}.{valStr}";
+                StatusText = $"Generated size {CellCount} ({openPortals} open doorways){optsStr}.{valStr}";
                 Console.WriteLine($"[Dungeon] Generated: {CellCount} cells, {result.RoomCount} target, {openPortals} open portals, style={result.Style}, favorites={result.UseFavoritesOnly}, seed={result.Seed}");
             }
             catch (Exception ex) {
@@ -1311,7 +1438,7 @@ namespace WorldBuilder.Editors.Dungeon {
         private Task<GeneratorParams?> ShowGenerateDialog(DungeonKnowledgeBase kb) {
             var favSigs = RoomPalette?.GetFavoritePrefabSignatures();
             var customPrefabs = RoomPalette?.GetCustomPrefabs();
-            return Dialogs.ShowGenerateDialog(kb, favSigs, customPrefabs);
+            return Dialogs.ShowGenerateDialog(kb, _dats, _textureImport, favSigs, customPrefabs);
         }
 
         private void ShowErrorDialog(string title, string message) =>
@@ -1672,6 +1799,9 @@ namespace WorldBuilder.Editors.Dungeon {
                 }
             }
             RoomPalette.SetActiveOpenPortals(openPortals);
+
+            if (openPortals.Count > 0 && !RoomPalette.ShowCompatibleOnly)
+                RoomPalette.ShowCompatibleOnly = true;
         }
 
         private void RefreshOpenPortalIndicators() {

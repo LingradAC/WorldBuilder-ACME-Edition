@@ -89,12 +89,25 @@
                 <ItemsControl.ItemTemplate>
                     <DataTemplate x:DataType="vm:PortalListEntry">
                         <Border Margin="0,1" Padding="4,3" CornerRadius="3" Background="#16102a">
-                            <Grid ColumnDefinitions="*,Auto">
-                                <TextBlock Grid.Column="0" Text="{Binding DisplayText}" FontSize="10" FontFamily="Consolas" Foreground="#c0b0d8" VerticalAlignment="Center" />
-                                <Button Grid.Column="1" Classes="dng-toolbar-btn" Content="Disconnect"
-                                        Command="{Binding $parent[UserControl].((vm:DungeonEditorViewModel)DataContext).DisconnectPortalAtCommand}"
-                                        CommandParameter="{Binding Index}" FontSize="9" Padding="6,1" Foreground="#cc6666" IsVisible="{Binding IsConnected}" />
-                            </Grid>
+                            <StackPanel Spacing="2">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBlock Grid.Column="0" Text="{Binding DisplayText}" FontSize="10" FontFamily="Consolas" Foreground="#c0b0d8" VerticalAlignment="Center" />
+                                    <Button Grid.Column="1" Classes="dng-toolbar-btn" Content="Disconnect"
+                                            Command="{Binding $parent[UserControl].((vm:DungeonEditorViewModel)DataContext).DisconnectPortalAtCommand}"
+                                            CommandParameter="{Binding Index}" FontSize="9" Padding="6,1" Foreground="#cc6666" IsVisible="{Binding IsConnected}" />
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Spacing="4" IsVisible="{Binding IsOpen}">
+                                    <Button Classes="dng-toolbar-btn" Content="Cap"
+                                            Command="{Binding $parent[UserControl].((vm:DungeonEditorViewModel)DataContext).CapPortalCommand}"
+                                            CommandParameter="{Binding}" FontSize="9" Padding="6,2" Foreground="#6ec07a"
+                                            ToolTip.Tip="Auto-seal this doorway with a dead-end room" />
+                                    <Button Classes="dng-toolbar-btn" Content="Show Fits"
+                                            Command="{Binding $parent[UserControl].((vm:DungeonEditorViewModel)DataContext).FilterPaletteForPortalCommand}"
+                                            CommandParameter="{Binding}" FontSize="9" Padding="6,2" Foreground="#4dbdbd"
+                                            ToolTip.Tip="Filter the piece palette to show only pieces that connect to this doorway" />
+                                    <TextBlock Text="{Binding CompatibleHint}" FontSize="9" Foreground="#5a6a6a" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </StackPanel>
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>

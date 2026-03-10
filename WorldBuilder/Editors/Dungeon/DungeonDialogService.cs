@@ -2,16 +2,23 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.Input;
+using DatReaderWriter.DBObjs;
+using DatReaderWriter.Enums;
 using DialogHostAvalonia;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using WorldBuilder.Lib;
 using WorldBuilder.Shared.Documents;
+using WorldBuilder.Shared.Lib;
+using WorldBuilder.Services;
+using Chorizite.OpenGLSDLBackend.Lib;
 
 namespace WorldBuilder.Editors.Dungeon {
 
@@ -343,7 +350,7 @@ namespace WorldBuilder.Editors.Dungeon {
             }
         }
 
-        public async Task<GeneratorParams?> ShowGenerateDialog(DungeonKnowledgeBase kb, HashSet<string>? favoritePrefabSignatures = null, List<DungeonPrefab>? customPrefabs = null) {
+        public async Task<GeneratorParams?> ShowGenerateDialog(DungeonKnowledgeBase kb, IDatReaderWriter? dats = null, TextureImportService? textureImport = null, HashSet<string>? favoritePrefabSignatures = null, List<DungeonPrefab>? customPrefabs = null) {
             GeneratorParams? result = null;
             int favCount = favoritePrefabSignatures?.Count ?? 0;
 
@@ -355,13 +362,223 @@ namespace WorldBuilder.Editors.Dungeon {
                 .OrderBy(s => s);
             styles.AddRange(seenStyles);
 
-            var roomCount = new NumericUpDown { Value = 10, Minimum = 3, Maximum = 50, Width = 100, FontSize = 12 };
+            var roomCount = new NumericUpDown { Value = 64, Minimum = 8, Maximum = 512, Width = 110, FontSize = 12 };
+
+            var themeLookup = kb.StyleThemes.ToDictionary(t => t.Name, t => t, StringComparer.OrdinalIgnoreCase);
+
+            var styleItems = new List<StackPanel>();
+            foreach (var styleName in styles) {
+                var row = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 6 };
+                if (themeLookup.TryGetValue(styleName, out var theme) && dats != null) {
+                    var wallThumb = RenderSurfaceMiniThumb(dats, theme.WallSurface);
+                    var floorThumb = RenderSurfaceMiniThumb(dats, theme.FloorSurface);
+                    if (wallThumb != null)
+                        row.Children.Add(new Avalonia.Controls.Image { Source = wallThumb, Width = 20, Height = 20 });
+                    if (floorThumb != null)
+                        row.Children.Add(new Avalonia.Controls.Image { Source = floorThumb, Width = 20, Height = 20 });
+                }
+                row.Children.Add(new TextBlock {
+                    Text = styleName == "All" ? "All (mixed)" : styleName,
+                    FontSize = 12, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+                });
+                styleItems.Add(row);
+            }
+
+            // Add "Custom" entry at the end
+            var customRow = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 6 };
+            customRow.Children.Add(new TextBlock {
+                Text = "Custom...",
+                FontSize = 12, FontStyle = FontStyle.Italic,
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+            });
+            styleItems.Add(customRow);
+            int customIndex = styleItems.Count - 1;
+
             var styleCombo = new ComboBox {
-                FontSize = 12, Width = 150,
-                ItemsSource = styles,
+                FontSize = 12, Width = 220,
+                ItemsSource = styleItems,
                 SelectedIndex = 0,
             };
-            var seedBox = new TextBox { Text = "0", Width = 100, FontSize = 12, Watermark = "0 = random" };
+
+            ushort customWall = 0x032A;
+            ushort customFloor = 0x032B;
+            var customWallImg = new Avalonia.Controls.Image { Width = 28, Height = 28 };
+            var customFloorImg = new Avalonia.Controls.Image { Width = 28, Height = 28 };
+            var customPanel = new StackPanel {
+                Spacing = 6, IsVisible = false, Margin = new Thickness(0, 4, 0, 0)
+            };
+
+            // Collect all unique dungeon surfaces from KB + custom imports
+            var dungeonSurfaceIds = new HashSet<ushort>();
+            foreach (var room in kb.Catalog) {
+                if (room.SampleSurfaces != null)
+                    foreach (var s in room.SampleSurfaces)
+                        dungeonSurfaceIds.Add(s);
+            }
+            var customImportIds = new List<ushort>();
+            if (textureImport != null) {
+                foreach (var entry in textureImport.Store.GetDungeonSurfaces()) {
+                    if (entry.SurfaceGid != 0) {
+                        ushort unqual = (ushort)(entry.SurfaceGid & 0xFFFF);
+                        customImportIds.Add(unqual);
+                        dungeonSurfaceIds.Add(unqual);
+                    }
+                }
+            }
+            var sortedSurfaceIds = dungeonSurfaceIds.OrderBy(id => id).ToArray();
+
+            // Build thumbnail cache (render once, reuse for both wall/floor grids)
+            var thumbCache = new Dictionary<ushort, Avalonia.Media.Imaging.WriteableBitmap?>();
+            if (dats != null) {
+                foreach (var sid in sortedSurfaceIds)
+                    thumbCache[sid] = RenderSurfaceMiniThumb(dats, sid);
+            }
+
+            // Selecting target: 0 = wall, 1 = floor
+            int pickingTarget = 0;
+            var wallInput = new TextBox { Text = "032A", Width = 80, FontSize = 10, Watermark = "Hex ID" };
+            var floorInput = new TextBox { Text = "032B", Width = 80, FontSize = 10, Watermark = "Hex ID" };
+
+            if (dats != null) {
+                customWallImg.Source = RenderSurfaceMiniThumb(dats, customWall);
+                customFloorImg.Source = RenderSurfaceMiniThumb(dats, customFloor);
+            }
+
+            // Surface grid (shared between wall/floor picking)
+            var surfaceGrid = new WrapPanel { Orientation = Avalonia.Layout.Orientation.Horizontal };
+            var surfaceScroll = new ScrollViewer {
+                MaxHeight = 120, Content = surfaceGrid,
+                HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled
+            };
+            var pickLabel = new TextBlock {
+                Text = "Pick wall texture:", FontSize = 10,
+                Foreground = new SolidColorBrush(Color.Parse("#c0b0d8")),
+                Margin = new Thickness(0, 2, 0, 2)
+            };
+
+            void PopulateSurfaceGrid() {
+                surfaceGrid.Children.Clear();
+                foreach (var sid in sortedSurfaceIds) {
+                    thumbCache.TryGetValue(sid, out var bmp);
+                    var img = new Avalonia.Controls.Image { Width = 24, Height = 24, Source = bmp };
+                    var btn = new Button {
+                        Content = img, Padding = new Thickness(1),
+                        Margin = new Thickness(1), MinWidth = 0, MinHeight = 0
+                    };
+                    Avalonia.Controls.ToolTip.SetTip(btn, $"0x{sid:X4}" +
+                        (customImportIds.Contains(sid) ? " (custom)" : ""));
+                    ushort capturedId = sid;
+                    btn.Click += (s, e) => {
+                        if (pickingTarget == 0) {
+                            customWall = capturedId;
+                            wallInput.Text = $"{capturedId:X4}";
+                            if (dats != null) customWallImg.Source = RenderSurfaceMiniThumb(dats, customWall);
+                        } else {
+                            customFloor = capturedId;
+                            floorInput.Text = $"{capturedId:X4}";
+                            if (dats != null) customFloorImg.Source = RenderSurfaceMiniThumb(dats, customFloor);
+                        }
+                        RefreshPickButtons();
+                    };
+                    surfaceGrid.Children.Add(btn);
+                }
+            }
+            var wallBtn = new Button { Padding = new Thickness(4, 2), FontSize = 10 };
+            var floorBtn = new Button { Padding = new Thickness(4, 2), FontSize = 10 };
+
+            void RefreshPickButtons() {
+                var wallContent = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 4 };
+                wallContent.Children.Add(new Avalonia.Controls.Image { Width = 20, Height = 20, Source = customWallImg.Source });
+                wallContent.Children.Add(new TextBlock { Text = $"Wall: 0x{customWall:X4}", FontSize = 10,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    Foreground = new SolidColorBrush(Color.Parse("#c0b0d8")) });
+                wallBtn.Content = wallContent;
+
+                var floorContent = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 4 };
+                floorContent.Children.Add(new Avalonia.Controls.Image { Width = 20, Height = 20, Source = customFloorImg.Source });
+                floorContent.Children.Add(new TextBlock { Text = $"Floor: 0x{customFloor:X4}", FontSize = 10,
+                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                    Foreground = new SolidColorBrush(Color.Parse("#c0b0d8")) });
+                floorBtn.Content = floorContent;
+            }
+            RefreshPickButtons();
+
+            PopulateSurfaceGrid();
+
+            wallInput.TextChanged += (s, e) => {
+                var hex = (wallInput.Text ?? "").Trim().TrimStart('0', 'x', 'X');
+                if (ushort.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var id)) {
+                    customWall = id;
+                    if (dats != null) customWallImg.Source = RenderSurfaceMiniThumb(dats, customWall);
+                    RefreshPickButtons();
+                }
+            };
+            floorInput.TextChanged += (s, e) => {
+                var hex = (floorInput.Text ?? "").Trim().TrimStart('0', 'x', 'X');
+                if (ushort.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var id)) {
+                    customFloor = id;
+                    if (dats != null) customFloorImg.Source = RenderSurfaceMiniThumb(dats, customFloor);
+                    RefreshPickButtons();
+                }
+            };
+
+            wallBtn.Click += (s, e) => {
+                pickingTarget = 0;
+                pickLabel.Text = "Pick wall texture:";
+                wallBtn.BorderBrush = new SolidColorBrush(Color.Parse("#c0b0d8"));
+                floorBtn.BorderBrush = null;
+            };
+            floorBtn.Click += (s, e) => {
+                pickingTarget = 1;
+                pickLabel.Text = "Pick floor texture:";
+                floorBtn.BorderBrush = new SolidColorBrush(Color.Parse("#c0b0d8"));
+                wallBtn.BorderBrush = null;
+            };
+            wallBtn.BorderBrush = new SolidColorBrush(Color.Parse("#c0b0d8"));
+
+            var btnRow2 = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 8 };
+            btnRow2.Children.Add(wallBtn);
+            btnRow2.Children.Add(floorBtn);
+
+            var manualRow = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 6 };
+            manualRow.Children.Add(new TextBlock { Text = "Or hex ID:", FontSize = 9, Width = 56,
+                Foreground = new SolidColorBrush(Color.Parse("#6a5a7e")),
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center });
+            manualRow.Children.Add(wallInput);
+            manualRow.Children.Add(floorInput);
+
+            customPanel.Children.Add(btnRow2);
+            customPanel.Children.Add(pickLabel);
+            customPanel.Children.Add(surfaceScroll);
+            customPanel.Children.Add(manualRow);
+
+            styleCombo.SelectionChanged += (s, e) => {
+                customPanel.IsVisible = styleCombo.SelectedIndex == customIndex;
+            };
+
+            var seedBox = new TextBox { Text = "0", Width = 100, FontSize = 12, Watermark = "Random" };
+            var sizePresetCombo = new ComboBox {
+                FontSize = 12,
+                Width = 150,
+                ItemsSource = new[] {
+                    "Small (32)",
+                    "Medium (64)",
+                    "Large (128)",
+                    "Huge (192)",
+                    "Massive (256)"
+                },
+                SelectedIndex = 1
+            };
+            sizePresetCombo.SelectionChanged += (s, e) => {
+                roomCount.Value = sizePresetCombo.SelectedIndex switch {
+                    0 => 32,
+                    1 => 64,
+                    2 => 128,
+                    3 => 192,
+                    4 => 256,
+                    _ => roomCount.Value
+                };
+            };
 
             var panel = new StackPanel { Width = 380, Margin = new Thickness(16), Spacing = 8 };
             panel.Children.Add(new TextBlock {
@@ -377,6 +594,12 @@ namespace WorldBuilder.Editors.Dungeon {
                 TextWrapping = TextWrapping.Wrap, MaxWidth = 350,
                 Margin = new Thickness(0, 0, 0, 4)
             });
+            panel.Children.Add(new TextBlock {
+                Text = "Tip: Use size presets for quick results, or type any custom target size.",
+                FontSize = 10, Foreground = new SolidColorBrush(Color.Parse("#6a5a7e")),
+                TextWrapping = TextWrapping.Wrap, MaxWidth = 350,
+                Margin = new Thickness(0, -2, 0, 4)
+            });
 
             void AddRow(string label, Control control) {
                 var row = new DockPanel { Margin = new Thickness(0, 2) };
@@ -389,10 +612,17 @@ namespace WorldBuilder.Editors.Dungeon {
                 panel.Children.Add(row);
             }
 
-            var requireRoofCheck = new CheckBox {
-                Content = "Only use roofed pieces", IsChecked = true, FontSize = 11,
-                Foreground = new SolidColorBrush(Color.Parse("#c0b0d8"))
+            var branchingCombo = new ComboBox {
+                FontSize = 12, Width = 150,
+                ItemsSource = new[] { "Linear", "Moderate", "Heavy" },
+                SelectedIndex = 1
             };
+            var roomSizeCombo = new ComboBox {
+                FontSize = 12, Width = 150,
+                ItemsSource = new[] { "Small rooms", "Mixed", "Large rooms" },
+                SelectedIndex = 1
+            };
+
             var lockStyleCheck = new CheckBox {
                 Content = "Keep consistent style", IsChecked = true, FontSize = 11,
                 Foreground = new SolidColorBrush(Color.Parse("#c0b0d8"))
@@ -433,13 +663,16 @@ namespace WorldBuilder.Editors.Dungeon {
                 }
             };
 
-            AddRow("Rooms:", roomCount);
+            AddRow("Dungeon Size:", roomCount);
+            AddRow("Size Preset:", sizePresetCombo);
             AddRow("Style:", styleCombo);
-            AddRow("Seed:", seedBox);
+            panel.Children.Add(customPanel);
+            AddRow("Branching:", branchingCombo);
+            AddRow("Room Size:", roomSizeCombo);
+            AddRow("Seed (optional):", seedBox);
             panel.Children.Add(new Border { Height = 4 });
             panel.Children.Add(useFavoritesCheck);
             panel.Children.Add(favHint);
-            panel.Children.Add(requireRoofCheck);
             panel.Children.Add(lockStyleCheck);
             panel.Children.Add(allowVerticalCheck);
 
@@ -454,16 +687,23 @@ namespace WorldBuilder.Editors.Dungeon {
             genBtn.Click += (s, e) => {
                 int.TryParse(seedBox.Text, out var seed);
                 bool useFavs = useFavoritesCheck.IsChecked == true && favCount > 0;
+                int styleIdx = styleCombo.SelectedIndex;
+                bool isCustom = styleIdx == customIndex;
+                string selectedStyle = isCustom ? "Custom"
+                    : (styleIdx >= 0 && styleIdx < styles.Count ? styles[styleIdx] : "All");
                 result = new GeneratorParams {
                     RoomCount = (int)(roomCount.Value ?? 10),
-                    Style = useFavs ? "All" : (styleCombo.SelectedItem as string ?? "All"),
+                    Style = useFavs ? "All" : selectedStyle,
                     Seed = seed,
-                    RequireRoof = requireRoofCheck.IsChecked == true,
                     AllowVertical = allowVerticalCheck.IsChecked == true,
-                    LockStyle = useFavs ? false : (lockStyleCheck.IsChecked == true),
+                    LockStyle = useFavs ? false : (isCustom ? false : lockStyleCheck.IsChecked == true),
                     UseFavoritesOnly = useFavs,
                     FavoritePrefabSignatures = useFavs ? favoritePrefabSignatures : null,
                     CustomPrefabs = useFavs ? customPrefabs : null,
+                    Branching = branchingCombo.SelectedIndex,
+                    RoomSize = roomSizeCombo.SelectedIndex,
+                    CustomWallSurface = isCustom ? customWall : (ushort)0,
+                    CustomFloorSurface = isCustom ? customFloor : (ushort)0,
                 };
                 DialogHost.Close("DungeonDialogHost");
             };
@@ -595,5 +835,64 @@ namespace WorldBuilder.Editors.Dungeon {
 
             return null;
         }
+
+        private static WriteableBitmap? RenderSurfaceMiniThumb(IDatReaderWriter dats, ushort surfaceId) {
+            const int Size = 20;
+            uint fullId = (uint)(surfaceId | 0x08000000);
+            try {
+                if (!dats.TryGet<Surface>(fullId, out var surface)) return null;
+
+                if (surface.Type.HasFlag(SurfaceType.Base1Solid)) {
+                    var solidData = TextureHelpers.CreateSolidColorTexture(surface.ColorValue, Size, Size);
+                    return SurfaceBrowserViewModel.CreateBitmap(solidData, Size, Size);
+                }
+
+                if (!dats.TryGet<SurfaceTexture>(surface.OrigTextureId, out var surfTex) ||
+                    surfTex.Textures?.Any() != true)
+                    return null;
+
+                var rsId = surfTex.Textures.Last();
+                if (!dats.TryGet<RenderSurface>(rsId, out var rs)) return null;
+
+                int w = rs.Width, h = rs.Height;
+                byte[]? rgba = null;
+                switch (rs.Format) {
+                    case DatReaderWriter.Enums.PixelFormat.PFID_A8R8G8B8:
+                        rgba = DatIconLoader.SwizzleBgraToRgba(rs.SourceData, w * h);
+                        break;
+                    case DatReaderWriter.Enums.PixelFormat.PFID_R8G8B8:
+                        rgba = new byte[w * h * 4];
+                        for (int i = 0; i < w * h; i++) {
+                            rgba[i * 4 + 0] = rs.SourceData[i * 3 + 2];
+                            rgba[i * 4 + 1] = rs.SourceData[i * 3 + 1];
+                            rgba[i * 4 + 2] = rs.SourceData[i * 3 + 0];
+                            rgba[i * 4 + 3] = 255;
+                        }
+                        break;
+                    case DatReaderWriter.Enums.PixelFormat.PFID_INDEX16:
+                        if (dats.TryGet<DatReaderWriter.DBObjs.Palette>(rs.DefaultPaletteId, out var pal)) {
+                            rgba = new byte[w * h * 4];
+                            TextureHelpers.FillIndex16(rs.SourceData, pal, rgba.AsSpan(), w, h);
+                        }
+                        break;
+                    case DatReaderWriter.Enums.PixelFormat.PFID_DXT1:
+                        rgba = SurfaceBrowserViewModel.DecompressDxt1(rs.SourceData, w, h);
+                        break;
+                    case DatReaderWriter.Enums.PixelFormat.PFID_DXT3:
+                    case DatReaderWriter.Enums.PixelFormat.PFID_DXT5:
+                        rgba = SurfaceBrowserViewModel.DecompressDxt5(rs.SourceData, w, h,
+                            rs.Format == DatReaderWriter.Enums.PixelFormat.PFID_DXT3);
+                        break;
+                }
+
+                if (rgba == null) return null;
+                if (w != Size || h != Size)
+                    rgba = SurfaceBrowserViewModel.DownsampleNearest(rgba, w, h, Size, Size);
+                return SurfaceBrowserViewModel.CreateBitmap(rgba, Size, Size);
+            }
+            catch { return null; }
+        }
+
+    
     }
 }

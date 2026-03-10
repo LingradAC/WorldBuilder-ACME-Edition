@@ -20,22 +20,20 @@ void main() {
     vec3 lightDir = normalize(uLightDirection);
     vec3 viewDir = normalize(uCameraPosition - vFragPos);
 
-    // Diffuse lighting
     float diff = max(dot(normal, lightDir), 0.0);
     vec3 diffuse = diff * uSphereColor;
 
-    // Specular lighting
+    // Guard against pow(x, 0) undefined behavior in GLSL
+    float specPower = max(uSpecularPower, 0.001);
     vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), uSpecularPower);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.001), specPower);
     vec3 specular = spec * uSphereColor;
 
-    // Ambient lighting
     vec3 ambient = uAmbientIntensity * uSphereColor;
 
-    // Glow effect
-    vec3 glow = uGlowIntensity * uGlowColor * pow(max(dot(normal, viewDir), 0.0), uGlowPower);
+    float glowPower = max(uGlowPower, 0.001);
+    vec3 glow = uGlowIntensity * uGlowColor * pow(max(dot(normal, viewDir), 0.001), glowPower);
 
-    // Combine lighting components
     vec3 result = ambient + diffuse + specular + glow;
     FragColor = vec4(result, 1.0);
 }

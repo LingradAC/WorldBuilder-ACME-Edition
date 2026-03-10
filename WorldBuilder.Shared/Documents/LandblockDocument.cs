@@ -40,6 +40,14 @@ namespace WorldBuilder.Shared.Documents {
 
         private bool _loadedFromProjection;
 
+        /// <summary>
+        /// True when this document was restored from a saved project rather than
+        /// loaded fresh from the base DATs. Export must still write these documents
+        /// even if they haven't been edited this session.
+        /// </summary>
+        [MemoryPack.MemoryPackIgnore]
+        public bool LoadedFromProjection => _loadedFromProjection;
+
         public LandblockDocument(ILogger logger) : base(logger) {
         }
 

@@ -15,16 +15,89 @@ namespace WorldBuilder.Editors.Dungeon {
     }
 
     /// <summary>
+    /// Axis-aligned bounding box for a room in local space (before cell orientation).
+    /// Used for geometric overlap testing that is more accurate than origin-distance.
+    /// </summary>
+    public struct RoomAABB {
+        public Vector3 Min;
+        public Vector3 Max;
+
+        public Vector3 Center => (Min + Max) * 0.5f;
+        public Vector3 Extents => (Max - Min) * 0.5f;
+
+        /// <summary>
+        /// Transform this local-space AABB to world space given cell origin+orientation,
+        /// returning a conservative axis-aligned bounding box that encloses the rotated volume.
+        /// </summary>
+        public RoomAABB ToWorldSpace(Vector3 origin, Quaternion orientation) {
+            var localCenter = Center;
+            var localExtents = Extents;
+
+            var worldCenter = Vector3.Transform(localCenter, orientation) + origin;
+
+            // Rotate extents: compute the world-axis-aligned extent by summing
+            // the absolute contributions of each local axis.
+            var m = Matrix4x4.CreateFromQuaternion(orientation);
+            float ex = MathF.Abs(m.M11) * localExtents.X + MathF.Abs(m.M21) * localExtents.Y + MathF.Abs(m.M31) * localExtents.Z;
+            float ey = MathF.Abs(m.M12) * localExtents.X + MathF.Abs(m.M22) * localExtents.Y + MathF.Abs(m.M32) * localExtents.Z;
+            float ez = MathF.Abs(m.M13) * localExtents.X + MathF.Abs(m.M23) * localExtents.Y + MathF.Abs(m.M33) * localExtents.Z;
+
+            var worldExtents = new Vector3(ex, ey, ez);
+            return new RoomAABB { Min = worldCenter - worldExtents, Max = worldCenter + worldExtents };
+        }
+
+        public bool Intersects(RoomAABB other, float shrink = 0f) {
+            return Min.X + shrink < other.Max.X - shrink &&
+                   Max.X - shrink > other.Min.X + shrink &&
+                   Min.Y + shrink < other.Max.Y - shrink &&
+                   Max.Y - shrink > other.Min.Y + shrink &&
+                   Min.Z + shrink < other.Max.Z - shrink &&
+                   Max.Z - shrink > other.Min.Z + shrink;
+        }
+    }
+
+    /// <summary>
     /// Lazily caches portal polygon geometry (area, vertex count) from CellStruct data.
     /// Used for compatibility checks: two portals match if areas are within tolerance.
     /// </summary>
     public class PortalGeometryCache {
         private readonly Dictionary<(ushort envId, ushort cs, ushort polyId), PortalGeometryInfo?> _cache = new();
+        private readonly Dictionary<(ushort envId, ushort cs), RoomAABB?> _aabbCache = new();
         private readonly IDatReaderWriter _dats;
         private const float AreaTolerance = 0.15f;
 
         public PortalGeometryCache(IDatReaderWriter dats) {
             _dats = dats;
+        }
+
+        /// <summary>
+        /// Get the local-space axis-aligned bounding box for a room type,
+        /// computed from the CellStruct vertex array.
+        /// </summary>
+        public RoomAABB? GetAABB(ushort envId, ushort cellStruct) {
+            var key = (envId, cellStruct);
+            if (_aabbCache.TryGetValue(key, out var cached)) return cached;
+
+            var aabb = ComputeAABB(envId, cellStruct);
+            _aabbCache[key] = aabb;
+            return aabb;
+        }
+
+        private RoomAABB? ComputeAABB(ushort envId, ushort cellStruct) {
+            uint envFileId = (uint)(envId | 0x0D000000);
+            if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) return null;
+            if (!env.Cells.TryGetValue(cellStruct, out var cs)) return null;
+            if (cs.VertexArray?.Vertices == null || cs.VertexArray.Vertices.Count == 0) return null;
+
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            foreach (var vtx in cs.VertexArray.Vertices.Values) {
+                var p = vtx.Origin;
+                if (p.X < min.X) min.X = p.X; if (p.X > max.X) max.X = p.X;
+                if (p.Y < min.Y) min.Y = p.Y; if (p.Y > max.Y) max.Y = p.Y;
+                if (p.Z < min.Z) min.Z = p.Z; if (p.Z > max.Z) max.Z = p.Z;
+            }
+            return new RoomAABB { Min = min, Max = max };
         }
 
         public PortalGeometryInfo? Get(ushort envId, ushort cellStruct, ushort polyId) {

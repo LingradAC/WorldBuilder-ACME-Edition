@@ -189,13 +189,21 @@ namespace WorldBuilder.Editors.Dungeon {
                     connectedName = palette?.GetRoomDisplayName(
                         (uint)(otherDc.EnvironmentId | 0x0D000000), otherDc.CellStructure);
                 }
-                list.Add(new PortalListEntry(idx, cp.PolygonId, cp.OtherCellId, isConnected: true, connectedName));
+                list.Add(new PortalListEntry(idx, cp.PolygonId, cp.OtherCellId, isConnected: true, connectedName,
+                    ownerCellNum: cellNum, ownerEnvId: dc.EnvironmentId, ownerCellStruct: dc.CellStructure));
                 idx++;
             }
 
             foreach (var polyId in allPortalPolyIds) {
                 if (!connectedPolyIds.Contains(polyId)) {
-                    list.Add(new PortalListEntry(-1, polyId, 0, isConnected: false));
+                    int compatCount = 0;
+                    if (_ctx.PortalIndex != null) {
+                        var compat = _ctx.PortalIndex.GetCompatible(dc.EnvironmentId, dc.CellStructure, polyId);
+                        compatCount = compat.Count;
+                    }
+                    list.Add(new PortalListEntry(-1, polyId, 0, isConnected: false,
+                        ownerCellNum: cellNum, ownerEnvId: dc.EnvironmentId, ownerCellStruct: dc.CellStructure,
+                        compatibleCount: compatCount));
                 }
             }
             return list;

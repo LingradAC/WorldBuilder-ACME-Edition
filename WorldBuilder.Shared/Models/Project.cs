@@ -1,4 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Numerics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Xml.Linq;
@@ -325,20 +328,53 @@ namespace WorldBuilder.Shared.Models {
 
             onProgress?.Invoke("Writing static objects and dungeons...");
 
+            var dungeonManifestLines = new List<string>();
+
             // Export static object changes from LandblockDocuments, dungeon data, and portal table edits
             // Only save dirty documents -- streamed-in but unmodified docs must not overwrite
             // the base DAT content (which may have been repositioned above).
             foreach (var (docId, doc) in DocumentManager.ActiveDocs) {
                 if (doc is LandblockDocument lbDoc) {
-                    if (!lbDoc.IsDirty) continue;
+                    if (!lbDoc.IsDirty && !lbDoc.LoadedFromProjection) continue;
                     lbDoc.SaveToDats(writer, portalIteration);
                 }
                 else if (doc is DungeonDocument dungeonDoc) {
+                    var validation = dungeonDoc.ValidateComprehensive();
+                    int valErrors = validation.Count(v => v.Severity == DungeonDocument.ValidationSeverity.Error);
+                    int valWarnings = validation.Count(v => v.Severity == DungeonDocument.ValidationSeverity.Warning);
+                    var fingerprint = BuildDungeonFingerprint(dungeonDoc);
+
+                    onProgress?.Invoke(
+                        $"Exporting {docId}: cells={dungeonDoc.Cells.Count}, validation={valErrors} error(s)/{valWarnings} warning(s)");
+                    Console.WriteLine(
+                        $"[Export] Dungeon {docId}: path={exportDirectory}, validation={valErrors} error(s), {valWarnings} warning(s), {fingerprint}");
+
+                    if (valErrors > 0) {
+                        foreach (var err in validation.Where(v => v.Severity == DungeonDocument.ValidationSeverity.Error).Take(10)) {
+                            Console.WriteLine($"[Export]   {err}");
+                        }
+                    }
+
                     dungeonDoc.SaveToDats(writer, portalIteration);
+                    dungeonManifestLines.Add($"{docId}: {fingerprint}; validationErrors={valErrors}; validationWarnings={valWarnings}");
+                    dungeonManifestLines.Add($"{docId}.teleloc_center_cell={BuildCenteredTeleportLine(dungeonDoc, writer)}");
                 }
                 else if (doc is PortalDatDocument portalDoc) {
                     portalDoc.SaveToDats(writer, portalIteration);
                 }
+            }
+
+            if (dungeonManifestLines.Count > 0) {
+                var manifestPath = Path.Combine(exportDirectory, "worldbuilder_export_manifest.txt");
+                var manifest = new StringBuilder();
+                manifest.AppendLine($"export_utc={DateTime.UtcNow:O}");
+                manifest.AppendLine($"export_dir={exportDirectory}");
+                manifest.AppendLine($"portal_iteration={portalIteration}");
+                foreach (var line in dungeonManifestLines)
+                    manifest.AppendLine(line);
+                File.WriteAllText(manifestPath, manifest.ToString());
+                onProgress?.Invoke($"Wrote export manifest: {manifestPath}");
+                Console.WriteLine($"[Export] Wrote manifest: {manifestPath}");
             }
 
             onProgress?.Invoke("Writing custom textures...");
@@ -376,6 +412,79 @@ namespace WorldBuilder.Shared.Models {
             }
 
             return true;
+        }
+
+        private static string BuildDungeonFingerprint(DungeonDocument doc) {
+            int cellCount = doc.Cells.Count;
+            if (cellCount == 0) return "empty";
+
+            var first = doc.Cells.OrderBy(c => c.CellNumber).First();
+            float minZ = doc.Cells.Min(c => c.Origin.Z);
+            float maxZ = doc.Cells.Max(c => c.Origin.Z);
+            int linkedPortals = doc.Cells.Sum(c => c.CellPortals.Count(p => p.OtherCellId != 0 && p.OtherCellId != 0xFFFF));
+            int staticCount = doc.Cells.Sum(c => c.StaticObjects.Count);
+
+            return
+                $"lb=0x{doc.LandblockKey:X4}, cells={cellCount}, firstCell=0x{first.CellNumber:X4}," +
+                $" firstEnv=0x{first.EnvironmentId:X4}, firstPos=({first.Origin.X:F3},{first.Origin.Y:F3},{first.Origin.Z:F3})," +
+                $" zRange=[{minZ:F3},{maxZ:F3}], linkedPortals={linkedPortals}, statics={staticCount}";
+        }
+
+        private static string BuildCenteredTeleportLine(DungeonDocument doc, IDatReaderWriter dats) {
+            if (doc.Cells.Count == 0) return "N/A";
+
+            // Pick the cell closest to the dungeon's center of mass, then use that
+            // cell's floor centroid as a safe in-dungeon teleport target.
+            var center = new Vector3(
+                doc.Cells.Average(c => c.Origin.X),
+                doc.Cells.Average(c => c.Origin.Y),
+                doc.Cells.Average(c => c.Origin.Z));
+
+            var anchor = doc.Cells
+                .OrderBy(c => Vector3.DistanceSquared(c.Origin, center))
+                .ThenBy(c => c.CellNumber)
+                .First();
+
+            var pos = ComputeCellFloorCentroid(anchor, dats);
+            uint cellId = ((uint)doc.LandblockKey << 16) | anchor.CellNumber;
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "0x{0:X8} [{1:F6} {2:F6} {3:F6}] 1.000000 0.000000 0.000000 0.000000",
+                cellId,
+                pos.X,
+                pos.Y,
+                pos.Z);
+        }
+
+        private static Vector3 ComputeCellFloorCentroid(DungeonCellData cell, IDatReaderWriter dats) {
+            uint envFileId = (uint)(cell.EnvironmentId | 0x0D000000);
+            if (!dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env))
+                return cell.Origin;
+            if (!env.Cells.TryGetValue(cell.CellStructure, out var cs))
+                return cell.Origin;
+            if (cs.VertexArray?.Vertices == null || cs.VertexArray.Vertices.Count == 0)
+                return cell.Origin;
+
+            var rot = cell.Orientation;
+            if (rot.LengthSquared() < 0.01f) rot = Quaternion.Identity;
+            rot = Quaternion.Normalize(rot);
+
+            float minZ = float.MaxValue;
+            var centroid = Vector3.Zero;
+            int count = 0;
+
+            foreach (var vtx in cs.VertexArray.Vertices.Values) {
+                var worldPos = cell.Origin + Vector3.Transform(vtx.Origin, rot);
+                centroid += worldPos;
+                if (worldPos.Z < minZ) minZ = worldPos.Z;
+                count++;
+            }
+
+            if (count == 0) return cell.Origin;
+            centroid /= count;
+            centroid.Z = minZ + 0.005f;
+            return centroid;
         }
 
         private void CollectExportLayers(IEnumerable<TerrainLayerBase> items, List<TerrainLayer> result) {

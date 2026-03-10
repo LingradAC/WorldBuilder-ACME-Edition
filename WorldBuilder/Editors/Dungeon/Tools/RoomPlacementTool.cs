@@ -160,8 +160,8 @@ namespace WorldBuilder.Editors.Dungeon.Tools {
 
         /// <summary>
         /// Compute preview position for either a single room or the first cell of a prefab.
-        /// Tries portal snapping first; falls back to projecting the mouse ray onto a
-        /// horizontal plane so the ghost always follows the cursor.
+        /// Tries portal snapping first; falls back to raycasting against existing geometry
+        /// so the preview stays near what the user is looking at.
         /// Also sets the highlighted portal on the scene for visual feedback.
         /// </summary>
         private (Vector3 Origin, Quaternion Orientation)? ComputePreviewForAny(
@@ -171,7 +171,6 @@ namespace WorldBuilder.Editors.Dungeon.Tools {
 
             _lastPreviewSnappedToPortal = false;
 
-            // Clear portal highlight
             if (ctx.Scene != null) {
                 ctx.Scene.HighlightedPortalCellNum = 0;
                 ctx.Scene.HighlightedPortalPolyId = 0;
@@ -182,6 +181,12 @@ namespace WorldBuilder.Editors.Dungeon.Tools {
                 if (snapped != null) {
                     _lastPreviewSnappedToPortal = true;
                     return snapped;
+                }
+
+                // Raycast against dungeon geometry so preview stays near what's visible
+                var geoHit = ctx.Scene?.EnvCellManager?.Raycast(rayOrigin, rayDir);
+                if (geoHit != null && geoHit.Value.Hit) {
+                    return (geoHit.Value.HitPosition, Quaternion.Identity);
                 }
             }
 

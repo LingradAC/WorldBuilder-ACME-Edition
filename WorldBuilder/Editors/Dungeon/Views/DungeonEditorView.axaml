@@ -109,6 +109,8 @@
                                 ToolTip.Tip="Run comprehensive validation checks." />
                         <Button Classes="dng-toolbar-btn" Content="Generate..." Command="{Binding GenerateDungeonCommand}" Foreground="#4dbdbd"
                                 ToolTip.Tip="Build a new dungeon using proven room connections from real game data." />
+                        <Button Classes="dng-toolbar-btn" Content="Cap All" Command="{Binding CapAllOpenPortalsCommand}" Foreground="#6ec07a"
+                                ToolTip.Tip="Seal all open doorways with dead-end rooms using proven connections from real dungeons." />
                         <Button Classes="dng-toolbar-btn" Content="&#x2605; Favorite" Foreground="#bd974d"
                                 ToolTip.Tip="Favorite this dungeon for use with Generate from Favorites.">
                             <Button.Flyout>
@@ -294,7 +296,7 @@
                     <TextBlock DockPanel.Dock="Left" FontSize="11" Foreground="#8a7a9e" VerticalAlignment="Center" Text="Dungeon Editor" />
                     <TextBlock DockPanel.Dock="Right" HorizontalAlignment="Right" FontSize="11" Foreground="#5a4a6e" VerticalAlignment="Center">
                         <TextBlock.Text>
-                            <MultiBinding StringFormat="Rooms: {0}">
+                            <MultiBinding StringFormat="Size: {0}">
                                 <Binding Path="CellCount" />
                             </MultiBinding>
                         </TextBlock.Text>

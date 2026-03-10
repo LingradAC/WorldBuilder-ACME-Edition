@@ -95,19 +95,35 @@ namespace WorldBuilder.Editors.Dungeon {
         public ushort PolygonId { get; }
         public ushort OtherCellId { get; }
         public bool IsConnected { get; }
+        public bool IsOpen => !IsConnected;
         public string DisplayText { get; }
 
-        public PortalListEntry(int index, ushort polygonId, ushort otherCellId, bool isConnected, string? connectedRoomName = null) {
+        public ushort OwnerCellNum { get; }
+        public ushort OwnerEnvId { get; }
+        public ushort OwnerCellStruct { get; }
+        public int CompatibleCount { get; set; }
+        public string CompatibleHint => CompatibleCount > 0 ? $"{CompatibleCount} fits" : "";
+
+        public PortalListEntry(int index, ushort polygonId, ushort otherCellId, bool isConnected,
+            string? connectedRoomName = null,
+            ushort ownerCellNum = 0, ushort ownerEnvId = 0, ushort ownerCellStruct = 0,
+            int compatibleCount = 0) {
             Index = index;
             PolygonId = polygonId;
             OtherCellId = otherCellId;
             IsConnected = isConnected;
+            OwnerCellNum = ownerCellNum;
+            OwnerEnvId = ownerEnvId;
+            OwnerCellStruct = ownerCellStruct;
+            CompatibleCount = compatibleCount;
             if (isConnected) {
                 var target = !string.IsNullOrEmpty(connectedRoomName) ? connectedRoomName : $"Room 0x{otherCellId:X4}";
-                DisplayText = $"Door {index + 1} → {target}";
+                DisplayText = $"Door {index + 1} \u2192 {target}";
             }
             else {
-                DisplayText = $"Door (open)";
+                DisplayText = compatibleCount > 0
+                    ? $"Door (open \u2014 {compatibleCount} compatible)"
+                    : "Door (open)";
             }
         }
     }

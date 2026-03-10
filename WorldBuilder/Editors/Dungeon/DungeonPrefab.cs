@@ -7,7 +7,23 @@ namespace WorldBuilder.Editors.Dungeon {
 
     public class DungeonPrefab {
         public string Signature { get; set; } = "";
-        public int SourceLandblock { get; set; }
+        private int _sourceLandblock;
+        public int SourceLandblock {
+            get => _sourceLandblock;
+            set {
+                _sourceLandblock = value;
+                if (value != 0 && !SourceLandblocks.Contains(value))
+                    SourceLandblocks.Add(value);
+            }
+        }
+        /// <summary>
+        /// All landblocks this prefab signature was observed in.
+        /// Kept in addition to SourceLandblock for backwards compatibility.
+        /// </summary>
+        public List<int> SourceLandblocks { get; set; } = new();
+        public bool SourceHasBuildings { get; set; }
+        public int SourceBuildingCount { get; set; }
+        public List<int> SourceBuildingLinkedLandblocks { get; set; } = new();
         public string SourceDungeonName { get; set; } = "";
         public int UsageCount { get; set; } = 1;
         public List<PrefabCell> Cells { get; set; } = new();
@@ -53,6 +69,21 @@ namespace WorldBuilder.Editors.Dungeon {
                 return nx > 0 ? "E" : "W";
 
             return ny > 0 ? "N" : "S";
+        }
+
+        public IEnumerable<int> GetAllSourceLandblocks() {
+            if (SourceLandblocks.Count > 0) return SourceLandblocks;
+            if (SourceLandblock != 0) return new[] { SourceLandblock };
+            return Array.Empty<int>();
+        }
+
+        public bool HasSourceLandblock(int landblock) =>
+            SourceLandblocks.Contains(landblock) || SourceLandblock == landblock;
+
+        public IEnumerable<int> GetBuildingLinkedSourceLandblocks() {
+            if (SourceBuildingLinkedLandblocks.Count > 0) return SourceBuildingLinkedLandblocks;
+            if (SourceHasBuildings && SourceLandblock != 0) return new[] { SourceLandblock };
+            return Array.Empty<int>();
         }
     }
 
@@ -100,12 +131,22 @@ namespace WorldBuilder.Editors.Dungeon {
         public string Style { get; set; } = "";
         public string DisplayName { get; set; } = "";
         public int PortalCount { get; set; }
+        /// <summary>Verified portal count from actual CellStruct geometry (not CellPortals which can differ).</summary>
+        public int VerifiedPortalCount { get; set; }
+        /// <summary>Actual portal polygon IDs from the CellStruct.</summary>
+        public List<ushort> PortalPolyIds { get; set; } = new();
         public int UsageCount { get; set; }
         public float BoundsWidth { get; set; }
         public float BoundsDepth { get; set; }
         public float BoundsHeight { get; set; }
         public List<string> SourceDungeons { get; set; } = new();
         public List<ushort> SampleSurfaces { get; set; } = new();
+        /// <summary>Fraction of observed instances with non-zero RestrictionObj.</summary>
+        public float RestrictionRate { get; set; }
+        /// <summary>Fraction of observed portals that lead to outside (-1 cell).</summary>
+        public float OutsidePortalRate { get; set; }
+        /// <summary>Average VisibleCells count on observed instances.</summary>
+        public float MeanVisibleCells { get; set; }
         public bool HasCeiling { get; set; } = true;
         public List<PortalDimension> PortalDimensions { get; set; } = new();
     }
@@ -140,6 +181,8 @@ namespace WorldBuilder.Editors.Dungeon {
     /// </summary>
     public class DungeonTemplate {
         public ushort SourceLandblock { get; set; }
+        public bool SourceHasBuildings { get; set; }
+        public int SourceBuildingCount { get; set; }
         public string DungeonName { get; set; } = "";
         public string Style { get; set; } = "";
         public int CellCount { get; set; }

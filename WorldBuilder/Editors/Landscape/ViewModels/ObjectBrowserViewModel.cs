@@ -10,8 +10,10 @@ using System.Numerics;
 using System.Threading.Tasks;
 using WorldBuilder.Lib;
 using WorldBuilder.Lib.Converters;
+using WorldBuilder.Lib.Settings;
 using WorldBuilder.Shared.Documents;
 using WorldBuilder.Shared.Lib;
+using WorldBuilder.Shared.Lib.AceDb;
 using WorldBuilder.ViewModels;
 
 namespace WorldBuilder.Editors.Landscape.ViewModels {
@@ -24,7 +26,8 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         private readonly ObjectTagIndex _tagIndex = new();
         private readonly Func<ThumbnailRenderService?> _getThumbnailService;
         private readonly ThumbnailCache _thumbnailCache;
-        private bool _thumbnailsReady; // Deferred: don't request thumbnails until after startup
+        private readonly WorldBuilderSettings? _settings;
+        private bool _thumbnailsReady;
         private bool _subscribedToThumbnailReady;
         private uint[] _allSetupIds = Array.Empty<uint>();
         private uint[] _allGfxObjIds = Array.Empty<uint>();
@@ -32,8 +35,8 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         private bool _buildingIdsLoaded;
         private HashSet<uint> _sceneryIds = new();
         private bool _sceneryIdsLoaded;
+        private List<ObjectBrowserItem> _loadedWeenies = new();
 
-        // Lookup for updating items when thumbnails arrive from the render service
         private readonly Dictionary<uint, ObjectBrowserItem> _itemLookup = new();
 
         [ObservableProperty] private ObservableCollection<ObjectBrowserItem> _filteredItems = new();
@@ -44,18 +47,28 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         [ObservableProperty] private bool _showGfxObjs = true;
         [ObservableProperty] private bool _showBuildingsOnly;
         [ObservableProperty] private bool _showSceneryOnly;
+        [ObservableProperty] private bool _showWeenies;
+        [ObservableProperty] private bool _isLoadingWeenies;
+        [ObservableProperty] private bool _hasMore;
+
+        private const int BatchSize = 100;
+        private int _displayLimit = BatchSize;
 
         /// <summary>
         /// Gets the tag index for use by the view (e.g., tooltips).
         /// </summary>
         public ObjectTagIndex TagIndex => _tagIndex;
 
+        public event EventHandler<IReadOnlyList<(uint WeenieClassId, uint SetupId)>>? WeenieSetupsLoaded;
+
         public ObjectBrowserViewModel(TerrainEditingContext context, IDatReaderWriter dats,
-            Func<ThumbnailRenderService?>? getThumbnailService = null, ThumbnailCache? thumbnailCache = null) {
+            Func<ThumbnailRenderService?>? getThumbnailService = null, ThumbnailCache? thumbnailCache = null,
+            WorldBuilderSettings? settings = null) {
             _context = context;
             _dats = dats;
             _getThumbnailService = getThumbnailService ?? (() => null);
             _thumbnailCache = thumbnailCache ?? new ThumbnailCache();
+            _settings = settings;
 
             // Load keyword tag index for name-based search
             _tagIndex.LoadFromEmbeddedResource();
@@ -198,25 +211,20 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             }
         }
 
-        partial void OnSearchTextChanged(string value) {
-            ApplyFilter();
-        }
-
-        partial void OnShowSetupsChanged(bool value) {
-            ApplyFilter();
-        }
-
-        partial void OnShowGfxObjsChanged(bool value) {
-            ApplyFilter();
-        }
+        partial void OnSearchTextChanged(string value) { _displayLimit = BatchSize; ApplyFilter(); }
+        partial void OnShowSetupsChanged(bool value) { _displayLimit = BatchSize; ApplyFilter(); }
+        partial void OnShowGfxObjsChanged(bool value) { _displayLimit = BatchSize; ApplyFilter(); }
+        partial void OnShowWeeniesChanged(bool value) { _displayLimit = BatchSize; ApplyFilter(); }
 
         partial void OnShowBuildingsOnlyChanged(bool value) {
-            if (value) ShowSceneryOnly = false;
+            if (value) { ShowSceneryOnly = false; ShowWeenies = false; }
+            _displayLimit = BatchSize;
             ApplyFilter();
         }
 
         partial void OnShowSceneryOnlyChanged(bool value) {
-            if (value) ShowBuildingsOnly = false;
+            if (value) { ShowBuildingsOnly = false; ShowWeenies = false; }
+            _displayLimit = BatchSize;
             ApplyFilter();
         }
 
@@ -269,9 +277,17 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         /// Items start with placeholder thumbnails. Call RequestThumbnails() separately
         /// to load cached images and queue missing ones for rendering.
         /// </summary>
-        private ObservableCollection<ObjectBrowserItem> BuildItems(uint[] setups, uint[] gfxObjs) {
+        private ObservableCollection<ObjectBrowserItem> BuildItems(uint[] setups, uint[] gfxObjs, ObjectBrowserItem[]? weenies = null) {
             var items = new ObservableCollection<ObjectBrowserItem>();
             _itemLookup.Clear();
+
+            if (weenies != null) {
+                foreach (var w in weenies) {
+                    items.Add(w);
+                    if (w.Id != 0 && w.WeenieClassId.HasValue)
+                        _itemLookup.TryAdd(w.Id, w);
+                }
+            }
 
             foreach (var id in setups) {
                 var tags = _tagIndex.IsLoaded ? _tagIndex.GetTagString(id) : null;
@@ -286,14 +302,57 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
                 _itemLookup[id] = item;
             }
 
-            // Only request thumbnails after initial startup has settled.
-            // This avoids queuing render work during app initialization when
-            // the DAT reader is still busy with background loading.
             if (_thumbnailsReady) {
                 RequestThumbnails(items);
             }
 
             return items;
+        }
+
+        [RelayCommand]
+        private async Task LoadWeeniesFromDbAsync() {
+            if (_settings?.AceDbConnection == null) {
+                Status = "Configure ACE Database in Settings first.";
+                return;
+            }
+
+            IsLoadingWeenies = true;
+            Status = "Loading weenies from DB...";
+            try {
+                var aceSettings = _settings.AceDbConnection.ToAceDbSettings();
+                using var connector = new AceDbConnector(aceSettings);
+                var search = string.IsNullOrWhiteSpace(SearchText) ? null : SearchText.Trim();
+                var list = await connector.GetWeenieNamesAsync(search, limit: 1000);
+
+                _loadedWeenies.Clear();
+                var mappings = new List<(uint, uint)>();
+                foreach (var e in list) {
+                    var item = new ObjectBrowserItem(e.SetupId, e.ClassId, e.Name);
+                    _loadedWeenies.Add(item);
+                    if (e.SetupId != 0)
+                        mappings.Add((e.ClassId, e.SetupId));
+                }
+
+                ShowWeenies = true;
+                Status = _loadedWeenies.Count > 0
+                    ? $"{_loadedWeenies.Count} weenies loaded from DB"
+                    : "No weenies found. Check DB connection.";
+
+                WeenieSetupsLoaded?.Invoke(this, mappings);
+                ApplyFilter();
+            }
+            catch (Exception ex) {
+                Status = "DB error: " + ex.Message;
+            }
+            finally {
+                IsLoadingWeenies = false;
+            }
+        }
+
+        [RelayCommand]
+        private void ShowMore() {
+            _displayLimit += BatchSize;
+            ApplyFilter();
         }
 
         /// <summary>
@@ -310,7 +369,7 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
 
             int cached = 0, queued = 0, skipped = 0;
             foreach (var item in items) {
-                if (item.Thumbnail != null) { skipped++; continue; }
+                if (item.Thumbnail != null || item.Id == 0) { skipped++; continue; }
 
                 // Try disk cache first
                 var cachedBitmap = _thumbnailCache.TryLoadCached(item.Id);
@@ -373,15 +432,45 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
                 return;
             }
 
-            // Normal mode: show all Setups / GfxObjs
+            // Normal mode: show all Setups / GfxObjs / Weenies
             IEnumerable<uint> setups = ShowSetups ? _allSetupIds : Array.Empty<uint>();
             IEnumerable<uint> gfxObjs = ShowGfxObjs ? _allGfxObjIds : Array.Empty<uint>();
 
             var (fSetups, fGfx) = ApplySearchFilter(setups, gfxObjs, out var statusSuffix);
-            var setupResult = fSetups.Take(100).ToArray();
-            var gfxResult = fGfx.Take(100).ToArray();
-            FilteredItems = BuildItems(setupResult, gfxResult);
-            Status = statusSuffix ?? $"Showing {setupResult.Length} Setups, {gfxResult.Length} GfxObjs";
+
+            var allWeenies = Array.Empty<ObjectBrowserItem>();
+            if (ShowWeenies && _loadedWeenies.Count > 0) {
+                var search = SearchText?.Trim();
+                IEnumerable<ObjectBrowserItem> filtered = _loadedWeenies;
+                if (!string.IsNullOrWhiteSpace(search))
+                    filtered = filtered.Where(w =>
+                        w.DisplayId.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                        w.WeenieClassId?.ToString().Contains(search) == true);
+                allWeenies = filtered.ToArray();
+            }
+
+            var combinedDat = fSetups.Concat(fGfx).ToArray();
+            int totalMatches = combinedDat.Length + allWeenies.Length;
+
+            var weeniesTaken = allWeenies.Take(_displayLimit).ToArray();
+            int datBudget = Math.Max(0, _displayLimit - weeniesTaken.Length);
+            var datTaken = combinedDat.Take(datBudget).ToArray();
+
+            var setupResult = datTaken.Where(id => (id & 0xFF000000) == 0x02000000).ToArray();
+            var gfxResult = datTaken.Where(id => (id & 0xFF000000) != 0x02000000).ToArray();
+
+            FilteredItems = BuildItems(setupResult, gfxResult, weeniesTaken);
+            HasMore = (weeniesTaken.Length + datTaken.Length) < totalMatches;
+
+            int displayed = weeniesTaken.Length + datTaken.Length;
+            if (statusSuffix != null)
+                Status = statusSuffix;
+            else if (totalMatches == 0)
+                Status = "No results";
+            else if (HasMore)
+                Status = $"Showing {displayed} of {totalMatches} — click Show More";
+            else
+                Status = $"Showing all {displayed} results";
         }
 
         /// <summary>

@@ -18,12 +18,19 @@
                 FontSize="11"
                 Padding="4,3" />
 
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <CheckBox Content="Setups" IsChecked="{Binding ShowSetups}" FontSize="11" Padding="2,0" />
-                <CheckBox Content="GfxObj" IsChecked="{Binding ShowGfxObjs}" FontSize="11" Padding="2,0" />
-                <CheckBox Content="Buildings" IsChecked="{Binding ShowBuildingsOnly}" FontSize="11" Padding="2,0" />
-                <CheckBox Content="Scenery" IsChecked="{Binding ShowSceneryOnly}" FontSize="11" Padding="2,0" />
-            </StackPanel>
+            <WrapPanel Orientation="Horizontal">
+                <CheckBox Content="Setups" IsChecked="{Binding ShowSetups}" FontSize="11" Padding="2,0" Margin="0,0,8,0" />
+                <CheckBox Content="GfxObj" IsChecked="{Binding ShowGfxObjs}" FontSize="11" Padding="2,0" Margin="0,0,8,0" />
+                <CheckBox Content="Buildings" IsChecked="{Binding ShowBuildingsOnly}" FontSize="11" Padding="2,0" Margin="0,0,8,0" />
+                <CheckBox Content="Scenery" IsChecked="{Binding ShowSceneryOnly}" FontSize="11" Padding="2,0" Margin="0,0,8,0" />
+                <CheckBox Content="Weenies" IsChecked="{Binding ShowWeenies}" FontSize="11" Padding="2,0" />
+            </WrapPanel>
+
+            <Button Content="Load Weenies (DB)"
+                    Command="{Binding LoadWeeniesFromDbCommand}"
+                    IsEnabled="{Binding !IsLoadingWeenies}"
+                    FontSize="10" Padding="6,3" Margin="0,2,0,0"
+                    Background="Transparent" BorderThickness="0" Foreground="#6ec07a" />
 
             <TextBlock
                 FontSize="10"
@@ -34,49 +41,63 @@
         </StackPanel>
 
         <ScrollViewer>
-            <ItemsControl ItemsSource="{Binding FilteredItems}">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <WrapPanel Orientation="Horizontal" />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="vm:ObjectBrowserItem">
-                        <Button
-                            Margin="3"
-                            Padding="2"
-                            Command="{Binding $parent[UserControl].((vm:ObjectBrowserViewModel)DataContext).SelectForPlacementCommand}"
-                            CommandParameter="{Binding}"
-                            ToolTip.Tip="{Binding Tags}"
-                            Focusable="False"
-                            HorizontalContentAlignment="Center">
-                            <StackPanel Spacing="2" HorizontalAlignment="Center">
-                                <!-- Thumbnail image with placeholder fallback -->
-                                <Panel Width="80" Height="80">
-                                    <Border
-                                        Background="#FF2A2A2A"
-                                        CornerRadius="2"
-                                        IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNull}}" />
-                                    <Image
-                                        Width="80"
-                                        Height="80"
-                                        Source="{Binding Thumbnail}"
-                                        Stretch="Uniform"
-                                        IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNotNull}}" />
-                                </Panel>
-                                <!-- Object ID label -->
-                                <TextBlock
-                                    Text="{Binding DisplayId}"
-                                    FontSize="9"
-                                    FontFamily="Consolas"
-                                    HorizontalAlignment="Center"
-                                    TextTrimming="CharacterEllipsis"
-                                    MaxWidth="84" />
-                            </StackPanel>
-                        </Button>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <StackPanel Margin="0,0,0,32">
+                <ItemsControl ItemsSource="{Binding FilteredItems}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ObjectBrowserItem">
+                            <Button
+                                Margin="3"
+                                Padding="2"
+                                Command="{Binding $parent[UserControl].((vm:ObjectBrowserViewModel)DataContext).SelectForPlacementCommand}"
+                                CommandParameter="{Binding}"
+                                ToolTip.Tip="{Binding Tags}"
+                                Focusable="False"
+                                HorizontalContentAlignment="Center">
+                                <StackPanel Spacing="2" HorizontalAlignment="Center">
+                                    <Panel Width="80" Height="80">
+                                        <Border
+                                            Background="#FF2A2A2A"
+                                            CornerRadius="2"
+                                            IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNull}}" />
+                                        <Image
+                                            Width="80"
+                                            Height="80"
+                                            Source="{Binding Thumbnail}"
+                                            Stretch="Uniform"
+                                            IsVisible="{Binding Thumbnail, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                                    </Panel>
+                                    <TextBlock
+                                        Text="{Binding DisplayId}"
+                                        FontSize="9"
+                                        HorizontalAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        TextTrimming="CharacterEllipsis"
+                                        MaxHeight="30"
+                                        MaxWidth="84" />
+                                </StackPanel>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <Button
+                    Content="Show more..."
+                    Command="{Binding ShowMoreCommand}"
+                    IsVisible="{Binding HasMore}"
+                    HorizontalAlignment="Center"
+                    Margin="4,8"
+                    Padding="16,6"
+                    FontSize="11"
+                    Background="Transparent"
+                    BorderThickness="1"
+                    BorderBrush="#3a2d52"
+                    Foreground="#8a7a9e" />
+            </StackPanel>
         </ScrollViewer>
     </DockPanel>
 </UserControl>

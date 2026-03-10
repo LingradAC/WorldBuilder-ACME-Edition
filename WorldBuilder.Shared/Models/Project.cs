@@ -125,6 +125,12 @@ namespace WorldBuilder.Shared.Models {
         public AceDbSettings? AceDb { get; set; }
 
         /// <summary>
+        /// Outdoor landblock instance placements (generators/items/portals) added from the Terrain editor.
+        /// Exported to landblock_instances.sql when ACE DB is configured.
+        /// </summary>
+        public List<OutdoorInstancePlacement> OutdoorInstancePlacements { get; set; } = new();
+
+        /// <summary>
         /// Called during export to write custom textures and update Region.
         /// Set by the UI layer (TextureImportService) since image decoding requires platform deps.
         /// </summary>
@@ -137,6 +143,14 @@ namespace WorldBuilder.Shared.Models {
         /// </summary>
         [JsonIgnore]
         public Func<RepositionContext, Task>? OnExportReposition { get; set; }
+
+        /// <summary>
+        /// Called after dungeon DAT export with any dungeon documents that have
+        /// InstancePlacements (generators/items/portals for ACE landblock_instance).
+        /// The UI layer can generate SQL and write dungeon_instances.sql (and optionally apply).
+        /// </summary>
+        [JsonIgnore]
+        public Action<string, IReadOnlyList<DungeonDocument>>? OnExportDungeonInstances { get; set; }
 
         public bool ExportDats(string exportDirectory, int portalIteration, Action<string>? onProgress = null) {
             if (!Directory.Exists(exportDirectory)) {
@@ -363,6 +377,15 @@ namespace WorldBuilder.Shared.Models {
                     portalDoc.SaveToDats(writer, portalIteration);
                 }
             }
+
+            // Dungeon instance placements (generators/items/portals) for ACE DB
+            var dungeonsWithPlacements = new List<DungeonDocument>();
+            foreach (var (_, doc) in DocumentManager.ActiveDocs) {
+                if (doc is DungeonDocument dng && dng.InstancePlacements.Count > 0)
+                    dungeonsWithPlacements.Add(dng);
+            }
+            if (dungeonsWithPlacements.Count > 0)
+                OnExportDungeonInstances?.Invoke(exportDirectory, dungeonsWithPlacements);
 
             if (dungeonManifestLines.Count > 0) {
                 var manifestPath = Path.Combine(exportDirectory, "worldbuilder_export_manifest.txt");

@@ -4,10 +4,12 @@ using CommunityToolkit.Mvvm.ComponentModel;
 namespace WorldBuilder.Editors.Landscape.ViewModels {
     /// <summary>
     /// Represents a single object entry in the Object Browser thumbnail grid.
+    /// Used for both DAT objects (Setup/GfxObj) and ACE DB weenies.
     /// </summary>
     public partial class ObjectBrowserItem : ObservableObject {
         /// <summary>
-        /// The DAT object ID (Setup or GfxObj).
+        /// The DAT object ID (Setup or GfxObj) used for rendering/placement.
+        /// For weenies this is the Setup DID from the DB.
         /// </summary>
         public uint Id { get; }
 
@@ -17,14 +19,19 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         public bool IsSetup { get; }
 
         /// <summary>
-        /// Formatted hex display string (e.g. "Setup 0x02001234" or "GfxObj 0x01001234").
+        /// Formatted display string shown below the thumbnail.
         /// </summary>
         public string DisplayId { get; }
 
         /// <summary>
-        /// Keyword tags for tooltip display (e.g. "tree, oak, large"). Null if no tags.
+        /// Keyword tags for tooltip display. Null if no tags.
         /// </summary>
         public string? Tags { get; }
+
+        /// <summary>
+        /// Non-null when this item represents an ACE DB weenie rather than a DAT object.
+        /// </summary>
+        public uint? WeenieClassId { get; }
 
         /// <summary>
         /// Rendered thumbnail bitmap. Null until the thumbnail has been generated or loaded from cache.
@@ -37,7 +44,21 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             Id = id;
             IsSetup = isSetup;
             Tags = tags;
+            WeenieClassId = null;
             DisplayId = isSetup ? $"Setup  0x{id:X8}" : $"GfxObj 0x{id:X8}";
+        }
+
+        /// <summary>
+        /// Constructor for weenie items loaded from the ACE database.
+        /// </summary>
+        public ObjectBrowserItem(uint setupId, uint weenieClassId, string weenieName) {
+            Id = setupId;
+            IsSetup = setupId != 0 && (setupId & 0x02000000) != 0;
+            WeenieClassId = weenieClassId;
+            DisplayId = $"{weenieName}\n({weenieClassId})";
+            Tags = setupId != 0
+                ? $"{weenieName}\nWCID: {weenieClassId}\nSetup: 0x{setupId:X8}"
+                : $"{weenieName}\nWCID: {weenieClassId}\n(no 3D model)";
         }
     }
 }

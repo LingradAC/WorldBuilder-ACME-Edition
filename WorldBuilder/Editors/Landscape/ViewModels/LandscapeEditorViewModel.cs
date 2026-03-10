@@ -101,6 +101,8 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         private Project? _project;
         private IDatReaderWriter? _dats;
         public TerrainSystem? TerrainSystem { get; private set; }
+        /// <summary>Current project (for ACE outdoor instance placements).</summary>
+        public Project? Project => _project;
         public WorldBuilderSettings Settings { get; }
         public InputManager InputManager { get; }
 
@@ -169,7 +171,8 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             LayersPanel = new LayersViewModel(TerrainSystem);
             ObjectBrowser = new ObjectBrowserViewModel(
                 TerrainSystem.EditingContext, _dats,
-                () => TerrainSystem.Scene.ThumbnailService);
+                () => TerrainSystem.Scene.ThumbnailService,
+                settings: Settings);
             ObjectBrowser.PlacementRequested += OnPlacementRequested;
 
             TexturePalette = new TerrainTexturePaletteViewModel(TerrainSystem.Scene.SurfaceManager, _textureImport);
@@ -205,6 +208,7 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
             if (HistorySnapshotPanel != null) Register("History", "History", HistorySnapshotPanel, DockLocation.Right);
             if (BookmarksPanel != null) Register("Bookmarks", "Bookmarks", BookmarksPanel, DockLocation.Right);
 
+            Register("AceInstances", "ACE Instances", new AceInstancesPanelViewModel(this), DockLocation.Right);
             Register("Toolbox", "Tools", new ToolboxViewModel(this), DockLocation.Right);
 
             // Restore dock region modes

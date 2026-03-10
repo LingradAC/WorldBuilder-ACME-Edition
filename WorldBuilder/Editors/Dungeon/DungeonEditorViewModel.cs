@@ -91,6 +91,16 @@ namespace WorldBuilder.Editors.Dungeon {
         [NotifyPropertyChangedFor(nameof(SelectedCellPanelTitle))]
         private int _selectedCellCount; // 0 = none, 1 = single, >1 = multi
 
+        // Instance Placements (ACE DB generators/items/portals in dungeons)
+        public ObservableCollection<InstancePlacementItemViewModel> InstancePlacementItems { get; } = new();
+        [ObservableProperty] private string _newPlacementWcid = "";
+        [ObservableProperty] private ushort? _newPlacementCellNumber;
+        [ObservableProperty] private string _newPlacementX = "0";
+        [ObservableProperty] private string _newPlacementY = "0";
+        [ObservableProperty] private string _newPlacementZ = "0";
+        /// <summary>Cell numbers for the "Add placement" dropdown (from current document).</summary>
+        public ObservableCollection<ushort> InstancePlacementCellNumbers { get; } = new();
+
         [RelayCommand]
         private void ToggleCameraMode() {
             if (_scene == null) return;
@@ -109,6 +119,137 @@ namespace WorldBuilder.Editors.Dungeon {
         [RelayCommand]
         private void ResetCamera() {
             _scene?.FocusCamera();
+        }
+
+        /// <summary>Rebuild InstancePlacementItems and InstancePlacementCellNumbers from the current document.</summary>
+        private void RefreshInstancePlacementList() {
+            InstancePlacementItems.Clear();
+            InstancePlacementCellNumbers.Clear();
+            if (_document == null) return;
+            var cells = _document.Cells.OrderBy(c => c.CellNumber).ToList();
+            foreach (var c in cells)
+                InstancePlacementCellNumbers.Add(c.CellNumber);
+            int i = 0;
+            foreach (var p in _document.InstancePlacements) {
+                var pos = $"{p.Origin.X:F1}, {p.Origin.Y:F1}, {p.Origin.Z:F1}";
+                InstancePlacementItems.Add(new InstancePlacementItemViewModel(i, p.WeenieClassId, p.CellNumber, pos));
+                i++;
+            }
+            if (InstancePlacementCellNumbers.Count > 0 && !NewPlacementCellNumber.HasValue)
+                NewPlacementCellNumber = InstancePlacementCellNumbers[0];
+        }
+
+        /// <summary>
+        /// If ACE DB is configured and the document has no placements yet,
+        /// load existing landblock_instance rows for dungeon cells and show them.
+        /// </summary>
+        private async Task TryLoadDbInstancesAsync(ushort landblockKey) {
+            if (_document == null) return;
+            if (_document.InstancePlacements.Count > 0) return;
+            if (string.IsNullOrWhiteSpace(Settings?.AceDbConnection?.Host)) return;
+
+            try {
+                StatusText += " | Loading DB instances...";
+                var aceSettings = Settings.AceDbConnection.ToAceDbSettings();
+                using var connector = new Shared.Lib.AceDb.AceDbConnector(aceSettings);
+
+                var err = await connector.TestConnectionAsync();
+                if (err != null) {
+                    StatusText += $" | DB: {err}";
+                    return;
+                }
+
+                var records = await connector.GetInstancesAsync(
+                    landblockKey, cellMin: 0x0100, includeAngles: true);
+
+                if (records.Count == 0) {
+                    StatusText += " | No DB instances for this dungeon";
+                    return;
+                }
+
+                foreach (var r in records) {
+                    var dungeonLocal = new System.Numerics.Vector3(r.OriginX, r.OriginY, r.OriginZ);
+                    var orientation = new System.Numerics.Quaternion(
+                        r.AnglesX ?? 0f, r.AnglesY ?? 0f, r.AnglesZ ?? 0f, r.AnglesW ?? 1f);
+
+                    _document.InstancePlacements.Add(new DungeonInstancePlacement {
+                        WeenieClassId = r.WeenieClassId,
+                        CellNumber = r.CellId,
+                        Origin = dungeonLocal,
+                        Orientation = orientation,
+                    });
+                }
+
+                var wcids = records.Select(r => r.WeenieClassId).Distinct();
+                var setupMap = await connector.GetSetupDidsAsync(wcids);
+                int withVisual = 0;
+                if (_scene != null) {
+                    foreach (var (wcid, setupId) in setupMap) {
+                        _scene.CacheWeenieSetup(wcid, setupId);
+                        withVisual++;
+                    }
+                }
+
+                RefreshInstancePlacementList();
+                RefreshRendering();
+                StatusText += $" | {records.Count} DB instance(s), {withVisual} with 3D model";
+            }
+            catch (Exception ex) {
+                StatusText += $" | DB error: {ex.Message}";
+                Console.WriteLine($"[Dungeon] DB instance load failed: {ex.Message}");
+            }
+        }
+
+        [RelayCommand]
+        private void AddInstancePlacement() {
+            if (_document == null || _document.Cells.Count == 0) return;
+            if (!uint.TryParse(NewPlacementWcid.Trim().Replace("0x", ""), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var wcid) && !uint.TryParse(NewPlacementWcid.Trim(), out wcid)) {
+                StatusText = "Enter a valid Weenie Class ID (decimal or hex).";
+                return;
+            }
+            ushort cellNum = NewPlacementCellNumber ?? InstancePlacementCellNumbers.FirstOrDefault();
+            if (cellNum == 0) return;
+            float x = float.TryParse(NewPlacementX, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vx) ? vx : 0f;
+            float y = float.TryParse(NewPlacementY, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vy) ? vy : 0f;
+            float z = float.TryParse(NewPlacementZ, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var vz) ? vz : 0f;
+            _document.InstancePlacements.Add(new DungeonInstancePlacement {
+                WeenieClassId = wcid,
+                CellNumber = cellNum,
+                Origin = new System.Numerics.Vector3(x, y, z),
+                Orientation = System.Numerics.Quaternion.Identity,
+            });
+            _document.MarkDirty();
+            RefreshInstancePlacementList();
+            RefreshRendering();
+            StatusText = $"Added weenie {wcid} in room 0x{cellNum:X4}.";
+        }
+
+        [RelayCommand]
+        private void RemoveInstancePlacement(int index) {
+            if (_document == null || index < 0 || index >= _document.InstancePlacements.Count) return;
+            _document.InstancePlacements.RemoveAt(index);
+            _document.MarkDirty();
+            RefreshInstancePlacementList();
+            RefreshRendering();
+            StatusText = "Removed instance placement.";
+        }
+
+        [RelayCommand]
+        private void AddPlacementAtSelectedRoom() {
+            if (_document == null || Selection?.SelectedCell == null) return;
+            var cell = Selection.SelectedCell;
+            ushort cellNum = (ushort)(cell.CellId & 0xFFFF);
+            var dc = _document.GetCell(cellNum);
+            if (dc == null) return;
+            NewPlacementCellNumber = cellNum;
+            NewPlacementX = dc.Origin.X.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            NewPlacementY = dc.Origin.Y.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            NewPlacementZ = dc.Origin.Z.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            OnPropertyChanged(nameof(NewPlacementCellNumber));
+            OnPropertyChanged(nameof(NewPlacementX));
+            OnPropertyChanged(nameof(NewPlacementY));
+            OnPropertyChanged(nameof(NewPlacementZ));
+            StatusText = "Prefilled room and position. Enter Weenie Class ID and click Add.";
         }
 
         public string SelectedCellPanelTitle =>
@@ -157,6 +298,7 @@ namespace WorldBuilder.Editors.Dungeon {
         public DungeonHistoryPanelViewModel? HistoryPanel { get; private set; }
         public DungeonCommandHistory CommandHistory { get; } = new();
         public Lib.Docking.DockingManager DockingManager { get; } = new();
+
 
         private readonly TextureImportService? _textureImport;
 
@@ -208,8 +350,14 @@ namespace WorldBuilder.Editors.Dungeon {
             }
 
             ObjectBrowser = new DungeonObjectBrowserViewModel(_dats,
-                () => _scene?.ThumbnailService);
+                () => _scene?.ThumbnailService, settings: Settings);
             ObjectBrowser.PlacementRequested += OnObjectPlacementRequested;
+            ObjectBrowser.WeenieSetupsLoaded += (_, mappings) => {
+                if (_scene == null) return;
+                foreach (var (wcid, setupId) in mappings)
+                    _scene.CacheWeenieSetup(wcid, setupId);
+                RefreshRendering();
+            };
             OnPropertyChanged(nameof(ObjectBrowser));
 
             SurfaceBrowser = new SurfaceBrowserViewModel(_dats, _textureImport);
@@ -320,6 +468,7 @@ namespace WorldBuilder.Editors.Dungeon {
             if (SurfaceBrowser != null) Register("SurfaceBrowser", "Surfaces", SurfaceBrowser, Lib.Docking.DockLocation.Left);
             if (Toolbox != null) Register("Toolbox", "Tools", Toolbox, Lib.Docking.DockLocation.Right);
             if (HistoryPanel != null) Register("History", "History", HistoryPanel, Lib.Docking.DockLocation.Right);
+            Register("InstancePlacements", "Instance Placements", new InstancePlacementsPanelViewModel(this), Lib.Docking.DockLocation.Right);
             _graphPanel = new DungeonGraphPanelViewModel(this);
             Register("DungeonGraph", "Dungeon Map", _graphPanel, Lib.Docking.DockLocation.Bottom);
 
@@ -981,9 +1130,23 @@ namespace WorldBuilder.Editors.Dungeon {
         #region Object Placement
 
         private void OnObjectPlacementRequested(object? sender, Landscape.ViewModels.ObjectBrowserItem item) {
-            ObjectEditing.SetPendingObject(item.Id, item.IsSetup);
+            if (item.WeenieClassId.HasValue && item.Id == 0) {
+                NewPlacementWcid = item.WeenieClassId.Value.ToString();
+                StatusText = $"Weenie {item.WeenieClassId.Value} has no 3D model — use Instance Placements panel to place manually.";
+                return;
+            }
+
+            if (item.WeenieClassId.HasValue) {
+                ObjectEditing.SetPendingWeenie(item.WeenieClassId.Value, item.Id);
+                _scene?.CacheWeenieSetup(item.WeenieClassId.Value, item.Id);
+                PlacementStatusText = $"Click in viewport to place WCID {item.WeenieClassId.Value}";
+            }
+            else {
+                ObjectEditing.SetPendingObject(item.Id, item.IsSetup);
+                PlacementStatusText = $"Click in viewport to place 0x{item.Id:X8}";
+            }
+
             IsObjectPlacementMode = true;
-            PlacementStatusText = $"Click in viewport to place 0x{item.Id:X8}";
             _scene?.WarmupModel(item.Id, item.IsSetup);
 
             var objTool = Tools.OfType<ObjectPlacementTool>().FirstOrDefault();
@@ -1023,6 +1186,7 @@ namespace WorldBuilder.Editors.Dungeon {
             var status = ObjectEditing.TryPlaceObject(rayOrigin, rayDir);
             if (status != null) {
                 RefreshRendering();
+                RefreshInstancePlacementList();
                 StatusText = status;
             }
         }
@@ -1503,6 +1667,7 @@ namespace WorldBuilder.Editors.Dungeon {
             CommandHistory.Clear();
             _loadedLandblockKey = lbKey;
             _document = GetOrCreateDungeonDoc(lbKey);
+            RefreshInstancePlacementList();
             HasDungeon = true;
             CellCount = 0;
             StatusText = $"New dungeon — pick a room from the catalog to start building";
@@ -1519,6 +1684,7 @@ namespace WorldBuilder.Editors.Dungeon {
             if (_document != null) return;
             _loadedLandblockKey = 0xAAAA;
             _document = GetOrCreateDungeonDoc(_loadedLandblockKey);
+            RefreshInstancePlacementList();
             HasDungeon = true;
             EditingContext.Document = _document;
         }
@@ -1974,6 +2140,7 @@ namespace WorldBuilder.Editors.Dungeon {
 
             targetDoc.CopyFrom(sourceDoc, startCell);
             _document = targetDoc;
+            RefreshInstancePlacementList();
             _loadedLandblockKey = targetLb;
             _targetCellId = 0;
 
@@ -2046,6 +2213,8 @@ namespace WorldBuilder.Editors.Dungeon {
                 StatusText = $"Dungeon loaded: {CellCount} rooms, {connectedPortals / 2} connections, {openPortals} open doorways";
                 HasDungeon = true;
                 _needsCameraFocus = true;
+                RefreshInstancePlacementList();
+                _ = TryLoadDbInstancesAsync(landblockKey);
             }
             else {
                 StatusText = $"No dungeon rooms found for this landblock";

@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Data;
@@ -124,7 +124,8 @@ namespace WorldBuilder.Lib.Settings {
             if (current.GetType() == targetType) return current;
 
             var properties = current.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(p => p.PropertyType.IsClass && p.PropertyType != typeof(string) && p.GetMethod != null);
+                .Where(p => p.PropertyType.IsClass && p.PropertyType != typeof(string)
+                    && p.GetMethod != null && p.GetIndexParameters().Length == 0);
 
             foreach (var prop in properties) {
                 var child = prop.GetValue(current);

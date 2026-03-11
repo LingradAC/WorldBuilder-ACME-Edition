@@ -133,6 +133,8 @@
             <TextBlock Text="Surfaces (hex, comma-separated)" FontSize="10" Foreground="#5a4a6e" />
             <TextBox Text="{Binding SelectedCellSurfaces}" FontSize="10" TextWrapping="Wrap" AcceptsReturn="False" />
             <Button Classes="dng-toolbar-btn" Content="Apply Surfaces" Command="{Binding ApplySurfacesCommand}" FontSize="10" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+            <Button Classes="dng-toolbar-btn" Content="Match to Style" Command="{Binding MatchToStyleCommand}" FontSize="10" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                    Foreground="#4dbdbd" ToolTip.Tip="Retexture selected rooms to match the dominant style surfaces for their room type" />
             <Border Height="1" Background="#2a1d42" Margin="0,2" />
 
             <TextBlock Text="Place Object" FontSize="11" Foreground="#8a7a9e" />

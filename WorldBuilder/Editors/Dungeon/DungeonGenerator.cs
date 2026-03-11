@@ -30,6 +30,8 @@ namespace WorldBuilder.Editors.Dungeon {
         public ushort CustomWallSurface { get; init; }
         /// <summary>Custom floor surface ID (only used when Style == "Custom").</summary>
         public ushort CustomFloorSurface { get; init; }
+        /// <summary>When true, place static furnishings (torches, furniture, etc.) in generated rooms.</summary>
+        public bool FurnishRooms { get; init; } = true;
     }
 
     /// <summary>
@@ -51,9 +53,7 @@ namespace WorldBuilder.Editors.Dungeon {
         // AC dungeons are authored below terrain level; keep generated dungeons
         // anchored underground so teleports/loads match expected runtime behavior.
         private const float GeneratedDungeonBaseZ = -50f;
-        // Temporary safety toggle while isolating crash-on-teleport reports.
-        // Generated static payload can be re-enabled once stability is confirmed.
-        private const bool EnableAutoFurnish = false;
+        private const bool EnableAutoFurnish = true;
 
         /// <summary>
         /// Constrain a quaternion to yaw-only (Z-axis rotation). AC dungeon cells
@@ -1475,13 +1475,10 @@ namespace WorldBuilder.Editors.Dungeon {
             }
 
             // Post-generation: furnish rooms with static objects from the KB.
-            if (EnableAutoFurnish && kb.RoomStatics.Count > 0) {
+            if (EnableAutoFurnish && p.FurnishRooms && kb.RoomStatics.Count > 0) {
                 int furnished = FurnishRooms(doc, kb);
                 if (furnished > 0)
                     Console.WriteLine($"[DungeonGen] Furnished {furnished}/{doc.Cells.Count} rooms with static objects");
-            }
-            else if (!EnableAutoFurnish) {
-                Console.WriteLine("[DungeonGen] Auto-furnish disabled for stability isolation");
             }
 
             doc.ComputeVisibleCells();
@@ -2302,7 +2299,59 @@ namespace WorldBuilder.Editors.Dungeon {
         /// If found and surface slot count matches, replaces the cell's surfaces.
         /// Falls back to a style-wide "dominant palette" for cells without a direct match.
         /// </summary>
-        private static int RetextureCells(DungeonDocument doc, IDatReaderWriter dats,
+        /// <summary>
+        /// Compute what surfaces should be applied to a single cell to match a given style.
+        /// Returns the new surface list, or null if no match was found.
+        /// Used by the editor's "Match to Style" command for undo-safe per-cell retexturing.
+        /// </summary>
+        internal static List<ushort>? ComputeRetexturedSurfaces(DungeonCellData dc, DungeonKnowledgeBase kb, string style) {
+            var styleSurfaces = new Dictionary<(ushort, ushort), List<ushort>>();
+            foreach (var cr in kb.Catalog) {
+                if (!cr.Style.Equals(style, StringComparison.OrdinalIgnoreCase)) continue;
+                if (cr.SampleSurfaces.Count == 0) continue;
+                var key = (cr.EnvId, cr.CellStruct);
+                if (!styleSurfaces.ContainsKey(key))
+                    styleSurfaces[key] = cr.SampleSurfaces;
+            }
+
+            int needed = dc.Surfaces.Count;
+            if (needed == 0) return null;
+
+            // Direct match
+            var roomKey = (dc.EnvironmentId, dc.CellStructure);
+            if (styleSurfaces.TryGetValue(roomKey, out var directMatch) && directMatch.Count == needed)
+                return new List<ushort>(directMatch);
+
+            // Build fallback palette for this slot count
+            var surfaceLists = styleSurfaces.Values.Where(s => s.Count == needed).ToList();
+            if (surfaceLists.Count > 0) {
+                var palette = new List<ushort>(needed);
+                for (int i = 0; i < needed; i++) {
+                    var freqs = new Dictionary<ushort, int>();
+                    foreach (var sl in surfaceLists) {
+                        freqs.TryGetValue(sl[i], out int f);
+                        freqs[sl[i]] = f + 1;
+                    }
+                    palette.Add(freqs.Count > 0 ? freqs.OrderByDescending(kv => kv.Value).First().Key : (ushort)0x032A);
+                }
+                return palette;
+            }
+
+            // Stretch/shrink nearest slot count
+            if (styleSurfaces.Count > 0) {
+                var closest = styleSurfaces.Values
+                    .OrderBy(s => Math.Abs(s.Count - needed))
+                    .First();
+                var stretched = new List<ushort>(needed);
+                for (int i = 0; i < needed; i++)
+                    stretched.Add(closest[i % closest.Count]);
+                return stretched;
+            }
+
+            return null;
+        }
+
+        internal static int RetextureCells(DungeonDocument doc, IDatReaderWriter dats,
             DungeonKnowledgeBase kb, string style) {
 
             // Build lookup: (envId, cellStruct) → surfaces for the target style

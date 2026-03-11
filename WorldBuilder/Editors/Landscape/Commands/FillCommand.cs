@@ -38,6 +38,11 @@ namespace WorldBuilder.Editors.Landscape.Commands {
         /// Performs a read-only flood fill from the hit vertex, collecting all contiguous
         /// vertices with the same texture type. Returns a list of (landblockId, vertexIndex, oldType).
         /// Can be used for both preview highlighting and actual command execution.
+        ///
+        /// Uses a two-level approach: landblocks where every vertex matches are processed in
+        /// bulk (81 vertices at once, propagate to neighbors) while mixed landblocks fall back
+        /// to per-vertex BFS. This keeps a full-world fill (256x256 uniform landblocks) fast
+        /// by reducing ~5.3M individual vertex operations to ~65K landblock checks.
         /// </summary>
         /// <param name="allowedLandblocks">
         /// Optional set of landblock keys to constrain the fill to (e.g. visible/loaded landblocks).
@@ -58,7 +63,6 @@ namespace WorldBuilder.Editors.Landscape.Commands {
             uint startCellY = (uint)hitResult.CellY;
             ushort startLbID = (ushort)((startLbX << 8) | startLbY);
 
-            // If the starting landblock is outside allowed bounds, nothing to fill
             if (allowedLandblocks != null && !allowedLandblocks.Contains(startLbID))
                 return result;
 
@@ -71,21 +75,22 @@ namespace WorldBuilder.Editors.Landscape.Commands {
             byte oldType = startData[startIndex].Type;
             if (oldType == newType) return result;
 
-            var visited = new HashSet<(uint lbX, uint lbY, uint cellX, uint cellY)>();
+            var landblockDataCache = new Dictionary<ushort, TerrainEntry[]>();
+            landblockDataCache[startLbID] = startData;
+
+            // Fully-processed uniform landblocks (all 81 vertices matched and were added)
+            var fullyProcessed = new HashSet<ushort>();
+            // Per-vertex visited tracking only for mixed landblocks (bool[81] per lb)
+            var vertexVisited = new Dictionary<ushort, bool[]>();
+
             var queue = new Queue<(uint lbX, uint lbY, uint cellX, uint cellY)>();
             queue.Enqueue((startLbX, startLbY, startCellX, startCellY));
 
-            var landblockDataCache = new Dictionary<ushort, TerrainEntry[]>();
-
             while (queue.Count > 0) {
                 var (lbX, lbY, cellX, cellY) = queue.Dequeue();
-
-                if (visited.Contains((lbX, lbY, cellX, cellY))) continue;
-                visited.Add((lbX, lbY, cellX, cellY));
-
                 var lbID = (ushort)((lbX << 8) | lbY);
 
-                // Skip landblocks outside the allowed set
+                if (fullyProcessed.Contains(lbID)) continue;
                 if (allowedLandblocks != null && !allowedLandblocks.Contains(lbID)) continue;
 
                 if (!landblockDataCache.TryGetValue(lbID, out var data)) {
@@ -94,12 +99,50 @@ namespace WorldBuilder.Editors.Landscape.Commands {
                     landblockDataCache[lbID] = data;
                 }
 
+                // First time seeing this landblock: check if every vertex matches oldType
+                if (!vertexVisited.ContainsKey(lbID)) {
+                    bool uniform = true;
+                    for (int i = 0; i < data.Length; i++) {
+                        if (data[i].Type != oldType) { uniform = false; break; }
+                    }
+
+                    if (uniform) {
+                        fullyProcessed.Add(lbID);
+                        for (int i = 0; i < data.Length; i++)
+                            result.Add((lbID, i, oldType));
+
+                        // Propagate to neighboring landblocks via their shared border edges.
+                        // Queue all 9 border vertices per edge so mixed neighbors get
+                        // seeded correctly; uniform neighbors fast-path on the first vertex
+                        // and skip the rest via the fullyProcessed check.
+                        if (lbX > 0 && !fullyProcessed.Contains((ushort)(((lbX - 1) << 8) | lbY)))
+                            for (uint cy = 0; cy <= 8; cy++)
+                                queue.Enqueue((lbX - 1, lbY, 8, cy));
+                        if (lbX < 255 && !fullyProcessed.Contains((ushort)(((lbX + 1) << 8) | lbY)))
+                            for (uint cy = 0; cy <= 8; cy++)
+                                queue.Enqueue((lbX + 1, lbY, 0, cy));
+                        if (lbY > 0 && !fullyProcessed.Contains((ushort)((lbX << 8) | (lbY - 1))))
+                            for (uint cx = 0; cx <= 8; cx++)
+                                queue.Enqueue((lbX, lbY - 1, cx, 8));
+                        if (lbY < 255 && !fullyProcessed.Contains((ushort)((lbX << 8) | (lbY + 1))))
+                            for (uint cx = 0; cx <= 8; cx++)
+                                queue.Enqueue((lbX, lbY + 1, cx, 0));
+                        continue;
+                    }
+
+                    vertexVisited[lbID] = new bool[81];
+                }
+
+                // Mixed landblock: per-vertex BFS
+                var visited = vertexVisited[lbID];
                 int index = (int)(cellX * 9 + cellY);
-                if (index >= data.Length || data[index].Type != oldType) continue;
+                if (index >= data.Length || visited[index]) continue;
+                visited[index] = true;
+
+                if (data[index].Type != oldType) continue;
 
                 result.Add((lbID, index, oldType));
 
-                // Queue neighbors
                 if (cellX > 0) queue.Enqueue((lbX, lbY, cellX - 1, cellY));
                 else if (lbX > 0) queue.Enqueue((lbX - 1, lbY, 8, cellY));
 

@@ -83,6 +83,7 @@ namespace WorldBuilder.Shared.Documents {
         public List<DungeonInstancePlacement> InstancePlacements => _data.InstancePlacements;
 
         private ushort _nextCellNumber = 0x0100;
+        private readonly Queue<ushort> _recycledCellNumbers = new();
 
         public DungeonDocument(ILogger logger) : base(logger) {
         }
@@ -127,6 +128,7 @@ namespace WorldBuilder.Shared.Documents {
             if (Cells.Count > 0) {
                 _nextCellNumber = (ushort)(Cells.Max(c => c.CellNumber) + 1);
             }
+            _recycledCellNumbers.Clear();
             return true;
         }
 
@@ -704,6 +706,7 @@ namespace WorldBuilder.Shared.Documents {
             LoadCellsFromDat(dats);
             if (Cells.Count > 0)
                 _nextCellNumber = (ushort)(Cells.Max(c => c.CellNumber) + 1);
+            _recycledCellNumbers.Clear();
             ClearDirty();
         }
 
@@ -757,6 +760,8 @@ namespace WorldBuilder.Shared.Documents {
         }
 
         public ushort AllocateCellNumber() {
+            if (_recycledCellNumbers.Count > 0)
+                return _recycledCellNumbers.Dequeue();
             return _nextCellNumber++;
         }
 
@@ -805,6 +810,7 @@ namespace WorldBuilder.Shared.Documents {
             }
 
             Cells.Remove(cell);
+            _recycledCellNumbers.Enqueue(cellNumber);
             MarkDirty();
         }
 
@@ -886,6 +892,7 @@ namespace WorldBuilder.Shared.Documents {
         public void CopyFrom(DungeonDocument source, ushort startCellNum = 0x0100) {
             Cells.Clear();
             _nextCellNumber = startCellNum;
+            _recycledCellNumbers.Clear();
 
             var cellMap = new Dictionary<ushort, ushort>();
             ushort nextNum = startCellNum;

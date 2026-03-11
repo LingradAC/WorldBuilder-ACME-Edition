@@ -299,6 +299,8 @@ namespace WorldBuilder.Editors.Dungeon {
         public DungeonCommandHistory CommandHistory { get; } = new();
         public Lib.Docking.DockingManager DockingManager { get; } = new();
 
+        private readonly DungeonOpenPortalCache _openPortalCache = new();
+
 
         private readonly TextureImportService? _textureImport;
 
@@ -951,6 +953,59 @@ namespace WorldBuilder.Editors.Dungeon {
             if (status != null) { RefreshRendering(); StatusText = status; }
         }
 
+        [RelayCommand]
+        private void MatchToStyle() {
+            if (_document == null || _dats == null || Selection.SelectedCells.Count == 0) {
+                StatusText = "Select one or more rooms first, then use Match to Style";
+                return;
+            }
+
+            var kb = DungeonKnowledgeBuilder.LoadCached();
+            if (kb == null) {
+                StatusText = "Knowledge base not loaded — run Analyze Rooms first";
+                return;
+            }
+
+            // Determine the style from the first selected cell
+            var firstCell = Selection.SelectedCells[0];
+            var firstDc = _document.GetCell((ushort)(firstCell.CellId & 0xFFFF));
+            if (firstDc == null) return;
+            var catalogEntry = kb.Catalog.FirstOrDefault(c => c.EnvId == firstDc.EnvironmentId && c.CellStruct == firstDc.CellStructure);
+            var style = catalogEntry?.Style;
+            if (string.IsNullOrEmpty(style)) {
+                StatusText = "Could not determine style from selected room — try a different room";
+                return;
+            }
+
+            // Apply retexture via commands for undo support
+            var composite = new DungeonCompositeCommand($"Match to Style ({style})");
+            int count = 0;
+            foreach (var cell in Selection.SelectedCells) {
+                var cellNum = (ushort)(cell.CellId & 0xFFFF);
+                var dc = _document.GetCell(cellNum);
+                if (dc == null || dc.Surfaces.Count == 0) continue;
+
+                var newSurfaces = DungeonGenerator.ComputeRetexturedSurfaces(dc, kb, style);
+                if (newSurfaces != null && newSurfaces.Count == dc.Surfaces.Count) {
+                    composite.Add(new SetCellSurfacesCommand(cellNum, dc.Surfaces, newSurfaces));
+                    count++;
+                }
+            }
+
+            if (count == 0) {
+                StatusText = $"No matching style surfaces found for '{style}'";
+                return;
+            }
+
+            CommandHistory.Execute(composite, _document);
+            RefreshRendering();
+            if (Selection.SelectedCell != null) {
+                var dc = _document.GetCell((ushort)(Selection.SelectedCell.CellId & 0xFFFF));
+                if (dc != null) RefreshSurfaceSlots(dc);
+            }
+            StatusText = $"Matched {count} room(s) to '{style}' style";
+        }
+
         private void OnSurfaceSelected(object? sender, ushort surfaceId) {
             var (status, surfText, primaryDc) = CellEditing.ApplySurfaceFromBrowser(surfaceId, SelectedSurfaceSlot);
             RefreshRendering();
@@ -1297,51 +1352,45 @@ namespace WorldBuilder.Editors.Dungeon {
                 return (Vector3.Zero, Quaternion.Identity, false);
 
             if (EditingContext.PortalIndex != null && prefab.OpenFaces.Count > 0) {
-                foreach (var dc in _document.Cells) {
-                    uint envFileId = (uint)(dc.EnvironmentId | 0x0D000000);
-                    if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
-                    if (!env.Cells.TryGetValue(dc.CellStructure, out var cs)) continue;
+                var openPortals = _openPortalCache.GetOrRebuild(_document, _dats, _loadedLandblockKey);
+                foreach (var p in openPortals) {
+                    var dc = p.Cell;
+                    var cs = p.CellStruct;
+                    var pid = p.PolyId;
 
-                    var allPortals = PortalSnapper.GetPortalPolygonIds(cs);
-                    var connected = new HashSet<ushort>(dc.CellPortals.Select(cp => cp.PolygonId));
+                    foreach (var of in prefab.OpenFaces) {
+                        var match = EditingContext.PortalIndex.FindMatch(
+                            dc.EnvironmentId, dc.CellStructure, pid,
+                            of.EnvId, of.CellStruct);
+                        if (match == null) continue;
 
-                    foreach (var pid in allPortals) {
-                        if (connected.Contains(pid)) continue;
-
-                        foreach (var of in prefab.OpenFaces) {
-                            var match = EditingContext.PortalIndex.FindMatch(
-                                dc.EnvironmentId, dc.CellStructure, pid,
-                                of.EnvId, of.CellStruct);
-                            if (match == null) continue;
-
-                            var snapOrigin = dc.Origin + Vector3.Transform(match.RelOffset, dc.Orientation);
-                            var snapRot = Quaternion.Normalize(dc.Orientation * match.RelRot);
-                            return (snapOrigin, snapRot, true);
-                        }
-
-                        // Geometric fallback for the first open face
-                        var targetGeom = PortalSnapper.GetPortalGeometry(cs, pid);
-                        if (targetGeom == null) continue;
-                        var (centroid, normal) = PortalSnapper.TransformPortalToWorld(
-                            targetGeom.Value, dc.Origin, dc.Orientation);
-
-                        var firstFace = prefab.OpenFaces[0];
-                        uint pfEnvFileId = (uint)(firstFace.EnvId | 0x0D000000);
-                        if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(pfEnvFileId, out var pfEnv)) continue;
-                        if (!pfEnv.Cells.TryGetValue(firstFace.CellStruct, out var pfCS)) continue;
-
-                        var srcGeom = PortalSnapper.GetPortalGeometry(pfCS, firstFace.PolyId);
-                        if (srcGeom == null) continue;
-
-                        if (EditingContext.GeometryCache != null &&
-                            !EditingContext.GeometryCache.AreCompatible(
-                                dc.EnvironmentId, dc.CellStructure, pid,
-                                firstFace.EnvId, firstFace.CellStruct, firstFace.PolyId))
-                            continue;
-
-                        var (geoOrigin, geoRot) = PortalSnapper.ComputeSnapTransform(centroid, normal, srcGeom.Value);
-                        return (geoOrigin, geoRot, true);
+                        var snapOrigin = dc.Origin + Vector3.Transform(match.RelOffset, dc.Orientation);
+                        var snapRot = Quaternion.Normalize(dc.Orientation * match.RelRot);
+                        return (snapOrigin, snapRot, true);
                     }
+
+                    // Geometric fallback for the first open face
+                    var targetGeom = PortalSnapper.GetPortalGeometry(cs, pid);
+                    if (targetGeom == null) continue;
+                    var (centroid, normal) = PortalSnapper.TransformPortalToWorld(
+                        targetGeom.Value, dc.Origin, dc.Orientation);
+
+                    var firstFace = prefab.OpenFaces[0];
+                    uint pfEnvFileId = (uint)(firstFace.EnvId | 0x0D000000);
+                    if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(pfEnvFileId, out var pfEnv)) continue;
+                    if (!pfEnv.Cells.TryGetValue(firstFace.CellStruct, out var pfCS)) continue;
+
+                    var srcGeom = PortalSnapper.GetPortalGeometry(pfCS, firstFace.PolyId);
+                    if (srcGeom == null) continue;
+
+                    if (EditingContext.GeometryCache != null &&
+                        !EditingContext.GeometryCache.AreCompatible(
+                            dc.EnvironmentId, dc.CellStructure, pid,
+                            firstFace.EnvId, firstFace.CellStruct, firstFace.PolyId))
+                        continue;
+
+                    var (geoOrigin, geoRot) = PortalSnapper.ComputeSnapTransform(centroid, normal, srcGeom.Value);
+                    return (geoOrigin, geoRot, true);
                 }
             }
 
@@ -1683,16 +1732,7 @@ namespace WorldBuilder.Editors.Dungeon {
 
         private int CountOpenPortals() {
             if (_document == null || _dats == null) return 0;
-            int count = 0;
-            foreach (var c in _document.Cells) {
-                uint envFileId = (uint)(c.EnvironmentId | 0x0D000000);
-                if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
-                if (!env.Cells.TryGetValue(c.CellStructure, out var cs)) continue;
-                var portalIds = PortalSnapper.GetPortalPolygonIds(cs);
-                var connectedIds = new HashSet<ushort>(c.CellPortals.Select(cp => (ushort)cp.PolygonId));
-                count += portalIds.Count(p => !connectedIds.Contains(p));
-            }
-            return count;
+            return _openPortalCache.Count(_document, _dats, _loadedLandblockKey);
         }
 
         [RelayCommand]
@@ -1858,52 +1898,20 @@ namespace WorldBuilder.Editors.Dungeon {
 
             if (_document == null || _dats == null) return null;
 
-            // First try raycast hit cell
             var hit = _scene?.EnvCellManager?.Raycast(rayOrigin, rayDir);
 
-            // Collect all cells with open portals + their world-space portal centroids
-            var openPortalCells = new List<(DungeonCellData dc, DatReaderWriter.Types.CellStruct cs, ushort portalId, ushort cellNum, Vector3 centroid)>();
+            var portals = _openPortalCache.GetOrRebuild(_document, _dats, _loadedLandblockKey);
+            if (portals.Count == 0) return null;
 
-            foreach (var dc in _document.Cells) {
-                uint envFileId = (uint)(dc.EnvironmentId | 0x0D000000);
-                if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
-                if (!env.Cells.TryGetValue(dc.CellStructure, out var cs)) continue;
-
-                var allPortals = PortalSnapper.GetPortalPolygonIds(cs);
-                var connected = new HashSet<ushort>(dc.CellPortals.Select(cp => cp.PolygonId));
-
-                foreach (var pid in allPortals) {
-                    if (connected.Contains(pid)) continue;
-                    var geom = PortalSnapper.GetPortalGeometry(cs, pid);
-                    if (geom == null) continue;
-                    var (centroid, _) = PortalSnapper.TransformPortalToWorld(geom.Value, dc.Origin, dc.Orientation);
-                    openPortalCells.Add((dc, cs, pid, dc.CellNumber, centroid));
-                }
-            }
-
-            if (openPortalCells.Count == 0) return null;
-
-            // If we have a raycast hit, find the nearest open portal to the hit position
             if (hit != null && hit.Value.Hit) {
-                var hitPos = hit.Value.HitPosition;
-                var nearest = openPortalCells.OrderBy(p => (p.centroid - hitPos).LengthSquared()).First();
-                return (nearest.dc, nearest.cs, nearest.portalId, nearest.cellNum);
+                var nearest = _openPortalCache.FindNearestToPosition(hit.Value.HitPosition, _document, _dats, _loadedLandblockKey);
+                if (nearest != null)
+                    return (nearest.Value.Cell, nearest.Value.CellStruct, nearest.Value.PolyId, nearest.Value.CellNum);
             }
 
-            // No raycast hit: find the open portal nearest to the camera ray
-            float bestDist = float.MaxValue;
-            (DungeonCellData dc, DatReaderWriter.Types.CellStruct cs, ushort portalId, ushort cellNum, Vector3 centroid)? best = null;
-            foreach (var p in openPortalCells) {
-                var toPoint = p.centroid - rayOrigin;
-                var proj = Vector3.Dot(toPoint, rayDir);
-                if (proj < 0) continue;
-                var closest = rayOrigin + rayDir * proj;
-                var dist = (p.centroid - closest).LengthSquared();
-                if (dist < bestDist) { bestDist = dist; best = p; }
-            }
-
-            if (best == null) return null;
-            return (best.Value.dc, best.Value.cs, best.Value.portalId, best.Value.cellNum);
+            var byRay = _openPortalCache.FindNearestToRay(rayOrigin, rayDir, _document, _dats, _loadedLandblockKey);
+            if (byRay == null) return null;
+            return (byRay.Value.Cell, byRay.Value.CellStruct, byRay.Value.PolyId, byRay.Value.CellNum);
         }
 
         private List<ushort> GetSurfacesForRoom(RoomEntry room) {
@@ -1937,30 +1945,7 @@ namespace WorldBuilder.Editors.Dungeon {
 
         private List<ushort> FindDefaultSurfacesFromDat(ushort environmentId, ushort cellStructureIndex) {
             if (_dats == null) return new List<ushort>();
-            try {
-                // Scan LandBlockInfo entries to find an EnvCell using this environment
-                var lbiIds = _dats.Dats.GetAllIdsOfType<LandBlockInfo>().Take(2000).ToArray();
-                if (lbiIds.Length == 0) lbiIds = _dats.Dats.Cell.GetAllIdsOfType<LandBlockInfo>().Take(2000).ToArray();
-                foreach (var lbiId in lbiIds) {
-                    if (!_dats.TryGet<LandBlockInfo>(lbiId, out var lbi) || lbi.NumCells == 0) continue;
-                    uint lbId = lbiId >> 16;
-
-                    for (uint i = 0; i < lbi.NumCells && i < 100; i++) {
-                        uint cellId = (lbId << 16) | (0x0100 + i);
-                        if (!_dats.TryGet<EnvCell>(cellId, out var envCell)) continue;
-
-                        if (envCell.EnvironmentId == environmentId &&
-                            envCell.CellStructure == cellStructureIndex &&
-                            envCell.Surfaces.Count > 0) {
-                            return new List<ushort>(envCell.Surfaces);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex) {
-                Console.WriteLine($"[Dungeon] Error finding default surfaces: {ex.Message}");
-            }
-            return new List<ushort>();
+            return DungeonDocumentOperations.FindDefaultSurfacesFromDat(_dats, environmentId, cellStructureIndex);
         }
 
         private int CountRequiredSurfaceSlots(RoomEntry room) {
@@ -1984,6 +1969,7 @@ namespace WorldBuilder.Editors.Dungeon {
         private void RefreshRendering() {
             if (_scene == null || _document == null) return;
             _connectionLinesDirty = true;
+            _openPortalCache.Invalidate();
             _scene.InvalidateGrid();
             _scene.RefreshFromDocument(_document);
             RefreshOpenPortalIndicators();
@@ -1993,18 +1979,7 @@ namespace WorldBuilder.Editors.Dungeon {
 
         private void UpdatePaletteCompatibility() {
             if (_document == null || _dats == null || RoomPalette == null) return;
-            var openPortals = new List<(ushort envId, ushort cs, ushort polyId)>();
-            foreach (var dc in _document.Cells) {
-                uint envFileId = (uint)(dc.EnvironmentId | 0x0D000000);
-                if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
-                if (!env.Cells.TryGetValue(dc.CellStructure, out var cs)) continue;
-                var allPortals = PortalSnapper.GetPortalPolygonIds(cs);
-                var connected = new HashSet<ushort>(dc.CellPortals.Select(cp => cp.PolygonId));
-                foreach (var pid in allPortals) {
-                    if (!connected.Contains(pid))
-                        openPortals.Add((dc.EnvironmentId, dc.CellStructure, pid));
-                }
-            }
+            var openPortals = _openPortalCache.GetOpenPortalKeys(_document, _dats, _loadedLandblockKey);
             RoomPalette.SetActiveOpenPortals(openPortals);
 
             if (openPortals.Count > 0 && !RoomPalette.ShowCompatibleOnly)
@@ -2022,24 +1997,41 @@ namespace WorldBuilder.Editors.Dungeon {
 
             var openIndicators = new List<OpenPortalIndicator>();
             var connectedIndicators = new List<OpenPortalIndicator>();
+
+            // Rebuild the cache so open portal indicators and all other consumers share one pass
+            _openPortalCache.Rebuild(_document, _dats, _loadedLandblockKey);
+
+            // Open portals come directly from the cache
+            foreach (var p in _openPortalCache.OpenPortals) {
+                openIndicators.Add(new OpenPortalIndicator {
+                    WorldVertices = p.WorldVertices,
+                    Centroid = p.WorldCentroid,
+                    Normal = p.WorldNormal,
+                    CellNum = p.CellNum,
+                    PolyId = p.PolyId
+                });
+            }
+
+            // Connected portals still need a separate pass (they are excluded from the open cache)
+            uint lbId = _document.LandblockKey;
+            var blockX = (lbId >> 8) & 0xFF;
+            var blockY = lbId & 0xFF;
+            var lbOffset = new Vector3(blockX * 192f, blockY * 192f, 0f);
+            const float dungeonZBump = -50f;
+
             foreach (var dc in _document.Cells) {
                 uint envFileId = (uint)(dc.EnvironmentId | 0x0D000000);
                 if (!_dats.TryGet<DatReaderWriter.DBObjs.Environment>(envFileId, out var env)) continue;
                 if (!env.Cells.TryGetValue(dc.CellStructure, out var cs)) continue;
 
-                var allPortals = PortalSnapper.GetPortalPolygonIds(cs);
                 var connected = new HashSet<ushort>(dc.CellPortals.Select(cp => cp.PolygonId));
+                if (connected.Count == 0) continue;
 
-                uint lbId = _document.LandblockKey;
-                var blockX = (lbId >> 8) & 0xFF;
-                var blockY = lbId & 0xFF;
-                var lbOffset = new Vector3(blockX * 192f, blockY * 192f, 0f);
-                const float dungeonZBump = -50f;
                 var cellOrigin = dc.Origin + lbOffset + new Vector3(0, 0, dungeonZBump);
                 var cellRot = dc.Orientation;
                 var cellTransform = Matrix4x4.CreateFromQuaternion(cellRot) * Matrix4x4.CreateTranslation(cellOrigin);
 
-                foreach (var pid in allPortals) {
+                foreach (var pid in connected) {
                     if (!cs.Polygons.TryGetValue(pid, out var poly)) continue;
                     if (poly.VertexIds.Count < 3) continue;
 
@@ -2059,20 +2051,16 @@ namespace WorldBuilder.Editors.Dungeon {
                         ? Vector3.Normalize(Vector3.Transform(geom.Value.Normal, cellRot))
                         : Vector3.UnitZ;
 
-                    var indicator = new OpenPortalIndicator {
+                    connectedIndicators.Add(new OpenPortalIndicator {
                         WorldVertices = worldVerts.ToArray(),
                         Centroid = centroid,
                         Normal = normal,
                         CellNum = dc.CellNumber,
                         PolyId = pid
-                    };
-
-                    if (connected.Contains(pid))
-                        connectedIndicators.Add(indicator);
-                    else
-                        openIndicators.Add(indicator);
+                    });
                 }
             }
+
             _scene.OpenPortalIndicators = openIndicators;
             _scene.ConnectedPortalIndicators = connectedIndicators;
         }

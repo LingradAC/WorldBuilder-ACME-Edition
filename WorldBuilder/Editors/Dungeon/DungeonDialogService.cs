@@ -557,6 +557,36 @@ namespace WorldBuilder.Editors.Dungeon {
             };
 
             var seedBox = new TextBox { Text = "0", Width = 100, FontSize = 12, Watermark = "Random" };
+            var randomizeSeedBtn = new Button {
+                Content = "⟳",
+                Padding = new Thickness(6, 2),
+                FontSize = 14,
+            };
+            Avalonia.Controls.ToolTip.SetTip(randomizeSeedBtn, "Generate a random seed");
+            randomizeSeedBtn.Click += (s, e) => {
+                seedBox.Text = new Random().Next(1, 999999).ToString();
+            };
+            var seedRow = new StackPanel {
+                Orientation = Avalonia.Layout.Orientation.Horizontal,
+                Spacing = 6
+            };
+            seedRow.Children.Add(seedBox);
+            seedRow.Children.Add(randomizeSeedBtn);
+
+            var estimateLabel = new TextBlock {
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.Parse("#6a5a7e")),
+                Margin = new Thickness(0, -4, 0, 0)
+            };
+
+            void UpdateEstimate() {
+                int target = (int)(roomCount.Value ?? 64);
+                int capEstimate = Math.Max(4, (int)(target * 0.25));
+                estimateLabel.Text = $"~{target} content rooms + ~{capEstimate} cap rooms = ~{target + capEstimate} total cells";
+            }
+            UpdateEstimate();
+            roomCount.ValueChanged += (s, e) => UpdateEstimate();
+
             var sizePresetCombo = new ComboBox {
                 FontSize = 12,
                 Width = 150,
@@ -631,6 +661,10 @@ namespace WorldBuilder.Editors.Dungeon {
                 Content = "Allow vertical connections (ramps/stairs)", IsChecked = false, FontSize = 11,
                 Foreground = new SolidColorBrush(Color.Parse("#c0b0d8"))
             };
+            var furnishRoomsCheck = new CheckBox {
+                Content = "Furnish rooms (torches, furniture, decorations)", IsChecked = true, FontSize = 11,
+                Foreground = new SolidColorBrush(Color.Parse("#c0b0d8"))
+            };
 
             var favLabel = favCount > 0
                 ? $"Generate from favorites ({favCount} favorited)"
@@ -664,17 +698,19 @@ namespace WorldBuilder.Editors.Dungeon {
             };
 
             AddRow("Dungeon Size:", roomCount);
+            panel.Children.Add(estimateLabel);
             AddRow("Size Preset:", sizePresetCombo);
             AddRow("Style:", styleCombo);
             panel.Children.Add(customPanel);
             AddRow("Branching:", branchingCombo);
             AddRow("Room Size:", roomSizeCombo);
-            AddRow("Seed (optional):", seedBox);
+            AddRow("Seed (optional):", seedRow);
             panel.Children.Add(new Border { Height = 4 });
             panel.Children.Add(useFavoritesCheck);
             panel.Children.Add(favHint);
             panel.Children.Add(lockStyleCheck);
             panel.Children.Add(allowVerticalCheck);
+            panel.Children.Add(furnishRoomsCheck);
 
             var btnRow = new StackPanel {
                 Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 8,
@@ -704,6 +740,7 @@ namespace WorldBuilder.Editors.Dungeon {
                     RoomSize = roomSizeCombo.SelectedIndex,
                     CustomWallSurface = isCustom ? customWall : (ushort)0,
                     CustomFloorSurface = isCustom ? customFloor : (ushort)0,
+                    FurnishRooms = furnishRoomsCheck.IsChecked == true,
                 };
                 DialogHost.Close("DungeonDialogHost");
             };

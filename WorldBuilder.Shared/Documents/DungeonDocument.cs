@@ -385,7 +385,15 @@ namespace WorldBuilder.Shared.Documents {
             foreach (var envCell in envCells) {
                 if (envCell.StaticObjects == null || envCell.StaticObjects.Count == 0) continue;
                 int before = envCell.StaticObjects.Count;
-                envCell.StaticObjects.RemoveAll(stab => !datwriter.TryGet<Setup>(stab.Id, out _));
+                envCell.StaticObjects.RemoveAll(stab => {
+                    try {
+                        return !datwriter.TryGet<Setup>(stab.Id, out _);
+                    }
+                    catch (Exception ex) {
+                        _logger.LogWarning("[DungeonDoc] Failed to read Setup 0x{Id:X8} from dat: {Message}", stab.Id, ex.Message);
+                        return true;
+                    }
+                });
                 removed += before - envCell.StaticObjects.Count;
             }
 

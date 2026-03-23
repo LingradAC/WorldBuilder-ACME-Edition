@@ -457,6 +457,8 @@ namespace WorldBuilder.Editors.Dungeon {
         }
 
         private void InitDocking() {
+            DockingManager.Clear();
+
             var layouts = Settings.Dungeon.UIState.DockingLayout;
             var preferredDock = new Dictionary<string, Lib.Docking.DockLocation>(StringComparer.OrdinalIgnoreCase) {
                 ["RoomPalette"] = Lib.Docking.DockLocation.Left,

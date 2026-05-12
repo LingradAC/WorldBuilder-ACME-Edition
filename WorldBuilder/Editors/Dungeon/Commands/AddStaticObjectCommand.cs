@@ -21,9 +21,11 @@ namespace WorldBuilder.Editors.Dungeon {
         public void Execute(DungeonDocument document) {
             var cell = document.GetCell(_cellNum);
             if (cell == null) return;
-            // 0x00000000 is not a valid Setup/GfxObj — the client would dereference a null
-            // physics BSP and crash. Reject at the command level so the undo stack stays clean.
+            // 0x00000000 is not a valid DID and 0x01xxxxxx is a GfxObj (not a Setup) — only
+            // Setup DIDs (high byte 0x02) are valid stab references. Placing a GfxObj directly
+            // would cause TryGet<Setup> to throw on every export and the client may not render it.
             if (_objectId == 0) return;
+            if ((_objectId >> 24) != 0x02) return;
             cell.StaticObjects.Add(new DungeonStabData {
                 Id = _objectId,
                 Origin = _origin,

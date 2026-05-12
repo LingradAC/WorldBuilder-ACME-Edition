@@ -18,8 +18,11 @@ using WorldBuilder.ViewModels;
 
 namespace WorldBuilder.Editors.Dungeon {
     /// <summary>
-    /// Object browser for the Dungeon Editor. Browses Setup/GfxObj objects
+    /// Object browser for the Dungeon Editor. Browses Setup objects
     /// from the DAT files for placement as static objects inside dungeon cells.
+    /// GfxObj entries are intentionally excluded — only Setup DIDs (0x02xxxxxx)
+    /// are valid stab references; placing a GfxObj directly would be rejected
+    /// by the placement guard and is not renderable via the standard client path.
     /// Adapted from the landscape ObjectBrowserViewModel without terrain context dependencies.
     /// </summary>
     public partial class DungeonObjectBrowserViewModel : ViewModelBase {
@@ -41,7 +44,7 @@ namespace WorldBuilder.Editors.Dungeon {
         [ObservableProperty] private string _searchText = "";
         [ObservableProperty] private string _status = "Search by name or hex ID";
         [ObservableProperty] private bool _showSetups = true;
-        [ObservableProperty] private bool _showGfxObjs = true;
+        [ObservableProperty] private bool _showGfxObjs = false;
         [ObservableProperty] private bool _showWeenies;
         [ObservableProperty] private bool _showFavoritesOnly;
         [ObservableProperty] private bool _isLoadingWeenies;

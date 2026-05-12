@@ -50,7 +50,7 @@ namespace WorldBuilder.Editors.Landscape.ViewModels {
         [ObservableProperty] private string _status = "Search by name or hex ID";
 
         [ObservableProperty] private bool _showSetups = true;
-        [ObservableProperty] private bool _showGfxObjs = true;
+        [ObservableProperty] private bool _showGfxObjs = false;
         [ObservableProperty] private bool _showBuildingsOnly;
         [ObservableProperty] private bool _showSceneryOnly;
         [ObservableProperty] private bool _showWeenies;

@@ -542,6 +542,10 @@ namespace WorldBuilder.Shared.Documents {
                 _logger.LogWarning("[LBDoc] UpdateStaticObject: Id is 0 — skipping update (0x00000000 is not a valid asset ID)");
                 return;
             }
+            if ((updatedObj.Id >> 24) != 0x02) {
+                _logger.LogWarning("[LBDoc] UpdateStaticObject: Id 0x{Id:X8} is not a Setup DID (high byte 0x{Type:X2} != 0x02) — skipping", updatedObj.Id, updatedObj.Id >> 24);
+                return;
+            }
             _data.StaticObjects[index] = updatedObj;
             MarkDirty();
         }
@@ -552,6 +556,10 @@ namespace WorldBuilder.Shared.Documents {
         public int AddStaticObject(StaticObject obj) {
             if (obj.Id == 0) {
                 _logger.LogWarning("[LBDoc] AddStaticObject: Id is 0 — skipping (0x00000000 is not a valid asset ID)");
+                return -1;
+            }
+            if ((obj.Id >> 24) != 0x02) {
+                _logger.LogWarning("[LBDoc] AddStaticObject: Id 0x{Id:X8} is not a Setup DID (high byte 0x{Type:X2} != 0x02) — skipping", obj.Id, obj.Id >> 24);
                 return -1;
             }
             _data.StaticObjects.Add(obj);

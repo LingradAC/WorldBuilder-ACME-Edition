@@ -354,27 +354,37 @@ namespace WorldBuilder.Shared.Documents {
             }
 
             int filledEmpty = 0;
-            int mismatchObserved = 0;
+            int padded = 0;
+            int overcount = 0;
 
             foreach (var envCell in envCells) {
                 int requiredSlots = GetRequiredSurfaceSlots(datwriter, envCell.EnvironmentId, envCell.CellStructure);
+                if (requiredSlots <= 0) continue;
 
-                // Conservative export fix: only fill truly empty surface lists.
-                // Existing per-cell surface values may be valid runtime references
-                // even when they do not resolve through the simple Surface chain check.
-                if (requiredSlots > 0 && envCell.Surfaces.Count == 0) {
+                if (envCell.Surfaces.Count == 0) {
+                    // Completely empty: fill all slots with fallback.
                     envCell.Surfaces.AddRange(Enumerable.Repeat((ushort)fallbackSurfaceId.Value, requiredSlots));
                     filledEmpty++;
                 }
-                else if (requiredSlots > 0 && envCell.Surfaces.Count != requiredSlots) {
-                    mismatchObserved++;
+                else if (envCell.Surfaces.Count < requiredSlots) {
+                    // Under-count: polygons with PosSurface >= Surfaces.Count would go out of bounds
+                    // in the AC client. Pad the remainder using the last known surface so existing
+                    // slots keep their original textures and only the gap is filled with a safe value.
+                    ushort padValue = envCell.Surfaces[envCell.Surfaces.Count - 1];
+                    int deficit = requiredSlots - envCell.Surfaces.Count;
+                    envCell.Surfaces.AddRange(Enumerable.Repeat(padValue, deficit));
+                    padded++;
+                }
+                else if (envCell.Surfaces.Count > requiredSlots) {
+                    // Over-count: extra slots are harmless to the client but keep the list tidy.
+                    overcount++;
                 }
             }
 
-            if (filledEmpty > 0 || mismatchObserved > 0) {
+            if (filledEmpty > 0 || padded > 0 || overcount > 0) {
                 _logger.LogInformation(
-                    "[DungeonDoc] Surface sanitizer: filled {FilledEmpty} empty surface list(s); observed {Mismatches} non-empty slot-count mismatch(es) (left unchanged)",
-                    filledEmpty, mismatchObserved);
+                    "[DungeonDoc] Surface sanitizer: filled {FilledEmpty} empty surface list(s), padded {Padded} under-count list(s); {Overcount} over-count list(s) left as-is",
+                    filledEmpty, padded, overcount);
             }
         }
 
@@ -406,16 +416,22 @@ namespace WorldBuilder.Shared.Documents {
 
         private void SanitizeEnvCellStaticsForExport(IDatReaderWriter datwriter, List<EnvCell> envCells) {
             int removed = 0;
+            int parseErrors = 0;
             foreach (var envCell in envCells) {
                 if (envCell.StaticObjects == null || envCell.StaticObjects.Count == 0) continue;
                 int before = envCell.StaticObjects.Count;
                 envCell.StaticObjects.RemoveAll(stab => {
                     try {
+                        // Only remove stabs whose DID is definitively absent from the DAT.
+                        // If TryGet throws a parse error the DID may still be valid (DatReaderWriter
+                        // bug or unsupported binary variant); keep the reference so the user's
+                        // placed object is not silently deleted on export.
                         return !datwriter.TryGet<Setup>(stab.Id, out _);
                     }
                     catch (Exception ex) {
-                        _logger.LogWarning("[DungeonDoc] Failed to read Setup 0x{Id:X8} from dat: {Message}", stab.Id, ex.Message);
-                        return true;
+                        _logger.LogDebug("[DungeonDoc] Could not verify Setup 0x{Id:X8} (parse error: {Message}); keeping stab reference", stab.Id, ex.Message);
+                        parseErrors++;
+                        return false;
                     }
                 });
                 removed += before - envCell.StaticObjects.Count;
@@ -423,6 +439,9 @@ namespace WorldBuilder.Shared.Documents {
 
             if (removed > 0) {
                 _logger.LogWarning("[DungeonDoc] Static sanitizer removed {Removed} invalid stab reference(s) before export", removed);
+            }
+            if (parseErrors > 0) {
+                _logger.LogWarning("[DungeonDoc] Static sanitizer could not verify {ParseErrors} stab reference(s) due to DAT parse error(s); references preserved", parseErrors);
             }
         }
 

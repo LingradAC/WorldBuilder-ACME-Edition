@@ -415,33 +415,22 @@ namespace WorldBuilder.Shared.Documents {
         }
 
         private void SanitizeEnvCellStaticsForExport(IDatReaderWriter datwriter, List<EnvCell> envCells) {
+            // Only strip stabs with a null/zero ID — those are definitively invalid and would crash
+            // the AC client.  Do NOT gate on TryGet<Setup>: the referenced setup may legitimately
+            // live in the base-game portal.dat rather than the project's portal.dat (e.g. vanilla AC
+            // static objects in a dungeon that is being re-exported to a custom DAT set).  Removing
+            // valid stab references based on DAT presence was the root cause of placed objects
+            // silently disappearing on every open-then-export cycle.
             int removed = 0;
-            int parseErrors = 0;
             foreach (var envCell in envCells) {
                 if (envCell.StaticObjects == null || envCell.StaticObjects.Count == 0) continue;
                 int before = envCell.StaticObjects.Count;
-                envCell.StaticObjects.RemoveAll(stab => {
-                    try {
-                        // Only remove stabs whose DID is definitively absent from the DAT.
-                        // If TryGet throws a parse error the DID may still be valid (DatReaderWriter
-                        // bug or unsupported binary variant); keep the reference so the user's
-                        // placed object is not silently deleted on export.
-                        return !datwriter.TryGet<Setup>(stab.Id, out _);
-                    }
-                    catch (Exception ex) {
-                        _logger.LogDebug("[DungeonDoc] Could not verify Setup 0x{Id:X8} (parse error: {Message}); keeping stab reference", stab.Id, ex.Message);
-                        parseErrors++;
-                        return false;
-                    }
-                });
+                envCell.StaticObjects.RemoveAll(stab => stab.Id == 0);
                 removed += before - envCell.StaticObjects.Count;
             }
 
             if (removed > 0) {
-                _logger.LogWarning("[DungeonDoc] Static sanitizer removed {Removed} invalid stab reference(s) before export", removed);
-            }
-            if (parseErrors > 0) {
-                _logger.LogWarning("[DungeonDoc] Static sanitizer could not verify {ParseErrors} stab reference(s) due to DAT parse error(s); references preserved", parseErrors);
+                _logger.LogWarning("[DungeonDoc] Static sanitizer removed {Removed} zero-ID stab(s) before export", removed);
             }
         }
 
@@ -796,7 +785,17 @@ namespace WorldBuilder.Shared.Documents {
                     }
                     if (envCell.VisibleCells != null) dc.VisibleCells.AddRange(envCell.VisibleCells);
                     if (envCell.StaticObjects != null) {
+                        uint blockPrefix = (uint)LandblockKey << 16;
                         foreach (var stab in envCell.StaticObjects) {
+                            // Skip visibility stabs injected by PopulateVisibilityStabs on a previous
+                            // export.  They carry a full cell ID (same landblock prefix, cell number in
+                            // the dungeon range [0x0100, 0xFFFD]) rather than a Setup DID.  They are
+                            // regenerated from VisibleCells on every export so storing them in the
+                            // document would cause them to accumulate across round-trips.
+                            uint stabLow = stab.Id & 0xFFFFu;
+                            if ((stab.Id & 0xFFFF0000u) == blockPrefix && stabLow >= 0x0100u && stabLow <= 0xFFFDu)
+                                continue;
+
                             var stabOrigin = stab.Frame.Origin;
                             dc.StaticObjects.Add(new DungeonStabData {
                                 Id = stab.Id,

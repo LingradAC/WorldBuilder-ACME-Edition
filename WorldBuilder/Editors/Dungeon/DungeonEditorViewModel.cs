@@ -146,15 +146,17 @@ namespace WorldBuilder.Editors.Dungeon {
 
         /// <summary>
         /// If ACE DB is configured and the document has no placements yet,
-        /// load existing landblock_instance rows for dungeon cells and show them.
+        /// loads existing landblock_instance rows for dungeon cells and shows them.
+        /// Even when placements already exist (e.g. re-opened project), always
+        /// repopulates the WCID→SetupDID cache so instance placements are visible.
         /// </summary>
         private async Task TryLoadDbInstancesAsync(ushort landblockKey) {
             if (_document == null) return;
-            if (_document.InstancePlacements.Count > 0) return;
             if (string.IsNullOrWhiteSpace(Settings?.AceDbConnection?.Host)) return;
 
+            bool hasExistingPlacements = _document.InstancePlacements.Count > 0;
+
             try {
-                StatusText += " | Loading DB instances...";
                 var aceSettings = Settings.AceDbConnection.ToAceDbSettings();
                 using var connector = new Shared.Lib.AceDb.AceDbConnector(aceSettings);
 
@@ -164,29 +166,43 @@ namespace WorldBuilder.Editors.Dungeon {
                     return;
                 }
 
-                var records = await connector.GetInstancesAsync(
-                    landblockKey, cellMin: 0x0100, includeAngles: true);
+                // Only load new records from the DB when the document has none yet.
+                // When re-opening a project that already has placements we skip the import
+                // but still repopulate the setup-ID cache below.
+                if (!hasExistingPlacements) {
+                    StatusText += " | Loading DB instances...";
+                    var records = await connector.GetInstancesAsync(
+                        landblockKey, cellMin: 0x0100, includeAngles: true);
 
-                if (records.Count == 0) {
-                    StatusText += " | No DB instances for this dungeon";
-                    return;
+                    if (records.Count > 0) {
+                        foreach (var r in records) {
+                            var dungeonLocal = new System.Numerics.Vector3(r.OriginX, r.OriginY, r.OriginZ);
+                            var orientation = new System.Numerics.Quaternion(
+                                r.AnglesX ?? 0f, r.AnglesY ?? 0f, r.AnglesZ ?? 0f, r.AnglesW ?? 1f);
+
+                            _document.InstancePlacements.Add(new DungeonInstancePlacement {
+                                WeenieClassId = r.WeenieClassId,
+                                CellNumber = r.CellId,
+                                Origin = dungeonLocal,
+                                Orientation = orientation,
+                            });
+                        }
+
+                        RefreshInstancePlacementList();
+                        StatusText += $" | {records.Count} DB instance(s) imported";
+                    }
+                    else {
+                        StatusText += " | No DB instances for this dungeon";
+                    }
                 }
 
-                foreach (var r in records) {
-                    var dungeonLocal = new System.Numerics.Vector3(r.OriginX, r.OriginY, r.OriginZ);
-                    var orientation = new System.Numerics.Quaternion(
-                        r.AnglesX ?? 0f, r.AnglesY ?? 0f, r.AnglesZ ?? 0f, r.AnglesW ?? 1f);
-
-                    _document.InstancePlacements.Add(new DungeonInstancePlacement {
-                        WeenieClassId = r.WeenieClassId,
-                        CellNumber = r.CellId,
-                        Origin = dungeonLocal,
-                        Orientation = orientation,
-                    });
-                }
-
-                var wcids = records.Select(r => r.WeenieClassId).Distinct();
-                var setupMap = await connector.GetSetupDidsAsync(wcids);
+                // Always refresh the WCID→SetupDID cache for all current placements.
+                // This covers both newly-imported records AND placements loaded from a
+                // saved project where the cache is empty (runtime-only, not persisted).
+                var allWcids = _document.InstancePlacements
+                    .Select(p => p.WeenieClassId)
+                    .Distinct();
+                var setupMap = await connector.GetSetupDidsAsync(allWcids);
                 int withVisual = 0;
                 if (_scene != null) {
                     foreach (var (wcid, setupId) in setupMap) {
@@ -195,9 +211,13 @@ namespace WorldBuilder.Editors.Dungeon {
                     }
                 }
 
-                RefreshInstancePlacementList();
-                RefreshRendering();
-                StatusText += $" | {records.Count} DB instance(s), {withVisual} with 3D model";
+                if (withVisual > 0 || !hasExistingPlacements) {
+                    RefreshRendering();
+                    if (hasExistingPlacements)
+                        StatusText += $" | Setup IDs resolved for {withVisual} weenie(s)";
+                    else
+                        StatusText += $" | {withVisual} weenie(s) with 3D model";
+                }
             }
             catch (Exception ex) {
                 StatusText += $" | DB error: {ex.Message}";

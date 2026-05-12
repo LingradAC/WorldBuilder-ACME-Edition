@@ -207,7 +207,8 @@ namespace WorldBuilder.Shared.Documents {
                     if (deletedCellIds.Count > 0) {
                         _logger.LogInformation("[LBDoc]   Building 0x{Id:X8} DELETED — {CellCount} EnvCells orphaned (will be cleaned up in Phase 2)",
                             building.ModelId, deletedCellIds.Count);
-                        lbi.NumCells -= (uint)deletedCellIds.Count;
+                        // Safe subtraction: NumCells is uint; decrement without underflow.
+                        lbi.NumCells = (uint)Math.Max(0L, (long)lbi.NumCells - deletedCellIds.Count);
                     }
                     else {
                         _logger.LogInformation("[LBDoc]   Building 0x{Id:X8} DELETED (no EnvCells)", building.ModelId);
@@ -479,6 +480,12 @@ namespace WorldBuilder.Shared.Documents {
         public bool Apply(BaseDocumentEvent evt) {
             if (evt is StaticObjectUpdateEvent objEvt) {
                 if (objEvt.IsAdd) {
+                    // Id == 0 is never a valid Setup or GfxObj — the client would try to look
+                    // up asset 0x00000000 and produce garbage or a crash.
+                    if (objEvt.Object.Id == 0) {
+                        _logger.LogWarning("[LBDoc] Apply: StaticObjectUpdateEvent has Id=0, skipping add");
+                        return true;
+                    }
                     _data.StaticObjects.Add(objEvt.Object);
                 }
                 else {
@@ -527,18 +534,26 @@ namespace WorldBuilder.Shared.Documents {
         }
 
         /// <summary>
-        /// Replaces a static object at the given index with updated data
+        /// Replaces a static object at the given index with updated data.
         /// </summary>
         public void UpdateStaticObject(int index, StaticObject updatedObj) {
             if (index < 0 || index >= _data.StaticObjects.Count) return;
+            if (updatedObj.Id == 0) {
+                _logger.LogWarning("[LBDoc] UpdateStaticObject: Id is 0 — skipping update (0x00000000 is not a valid asset ID)");
+                return;
+            }
             _data.StaticObjects[index] = updatedObj;
             MarkDirty();
         }
 
         /// <summary>
-        /// Adds a new static object to the landblock
+        /// Adds a new static object to the landblock. Returns the index, or -1 if the object is invalid.
         /// </summary>
         public int AddStaticObject(StaticObject obj) {
+            if (obj.Id == 0) {
+                _logger.LogWarning("[LBDoc] AddStaticObject: Id is 0 — skipping (0x00000000 is not a valid asset ID)");
+                return -1;
+            }
             _data.StaticObjects.Add(obj);
             MarkDirty();
             return _data.StaticObjects.Count - 1;

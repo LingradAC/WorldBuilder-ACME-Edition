@@ -35,6 +35,16 @@ uniform float uBrushRadius;         // Brush radius in world units
 uniform bool uPreviewActive;        // Enable/disable texture preview
 uniform float uPreviewTexIndex;     // Atlas layer index for preview texture
 
+// Fog uniforms
+uniform bool uFogEnabled;
+uniform vec3 uFogColor;
+uniform float uFogStart;
+uniform float uFogEnd;
+uniform vec2 uCameraPos2D;          // Camera XY world position for fog distance
+
+// Grid uses the actual half-FOV tangent so line thickness matches the projection
+uniform float uTanHalfFov;
+
 in vec3 vTexUV;
 in vec4 vOverlay0;
 in vec4 vOverlay1;
@@ -135,7 +145,7 @@ vec3 calculateGrid(vec2 worldPos, vec3 terrainColor) {
     float landblockLineWidthFactor = 2.0; // Double the thickness for landblock lines
 
     // Calculate pixel size in world units
-    float worldUnitsPerPixel = uCameraDistance * tan(0.785398) * 2.0 / uScreenHeight; // Assuming 45-degree FOV
+    float worldUnitsPerPixel = uCameraDistance * uTanHalfFov * 2.0 / uScreenHeight;
     float scaledLineWidth = uGridLineWidth * worldUnitsPerPixel;
     float scaledGlowWidth = scaledLineWidth * glowWidthFactor;
     float scaledLandblockGlowWidth = scaledGlowWidth * landblockLineWidthFactor; // Thicker glow for landblock lines
@@ -298,5 +308,12 @@ void main() {
     finalColor = finalColor + brushColor;
     
     vec3 litColor = finalColor * (saturate(vLightingFactor) + xAmbient);
+
+    if (uFogEnabled) {
+        float fogDist = length(vWorldPos - uCameraPos2D);
+        float fogFactor = clamp((fogDist - uFogStart) / max(uFogEnd - uFogStart, 1.0), 0.0, 1.0);
+        litColor = mix(litColor, uFogColor, fogFactor);
+    }
+
     FragColor = vec4(litColor, uAlpha);
 }

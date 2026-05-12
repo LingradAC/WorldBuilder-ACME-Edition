@@ -153,6 +153,10 @@ namespace WorldBuilder.Editors.Dungeon {
                     _pendingWeenieClassId.Value, cellNum, localOrigin, Quaternion.Identity);
                 _ctx.CommandHistory.Execute(cmd, _ctx.Document);
                 _ctx.Document.MarkDirty();
+                // Cache the setup DID so IntegrateInstancePlacements can render it immediately
+                // without waiting for a DB round-trip.
+                if (_ctx.Scene != null && _pendingObjectId.HasValue && _pendingObjectId.Value != 0)
+                    _ctx.Scene.CacheWeenieSetup(_pendingWeenieClassId.Value, _pendingObjectId.Value);
                 if (_ctx.Scene != null) _ctx.Scene.PlacementPreview = null;
                 return $"Placed weenie {_pendingWeenieClassId.Value} in room 0x{cellNum:X4}";
             }

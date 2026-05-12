@@ -21,6 +21,9 @@ namespace WorldBuilder.Editors.Dungeon {
         public void Execute(DungeonDocument document) {
             var cell = document.GetCell(_cellNum);
             if (cell == null) return;
+            // 0x00000000 is not a valid Setup/GfxObj — the client would dereference a null
+            // physics BSP and crash. Reject at the command level so the undo stack stays clean.
+            if (_objectId == 0) return;
             cell.StaticObjects.Add(new DungeonStabData {
                 Id = _objectId,
                 Origin = _origin,

@@ -114,12 +114,15 @@ namespace WorldBuilder.Shared.Lib {
                     continue;
                 }
 
-                UpdateParticleMotion(_def.ParticleType, ref s, lifetime, refFrame, out var worldPos, out var worldRot, out float uScale);
+                UpdateParticleMotion(_def.ParticleType, ref s, lifetime, refFrame, out var worldPos, out var worldRot, out float uScale, out float uAlpha);
 
-                outInstanceWorld.Add(
-                    Matrix4x4.CreateScale(uScale)
+                var mat = Matrix4x4.CreateScale(uScale)
                     * Matrix4x4.CreateFromQuaternion(worldRot)
-                    * Matrix4x4.CreateTranslation(worldPos));
+                    * Matrix4x4.CreateTranslation(worldPos);
+                // Encode per-particle alpha in M44 (normally 1.0 for affine transforms).
+                // The StaticObject.vert shader reads aInstanceMatrix[3].w as per-instance alpha.
+                mat.M44 = uAlpha;
+                outInstanceWorld.Add(mat);
             }
         }
 
@@ -200,7 +203,7 @@ namespace WorldBuilder.Shared.Lib {
 
             double lifetime = ComputeLifetime(ref s, timeSec, persistentUnlimited, 0f);
             Matrix4x4 refFrame = _def.IsParentLocal ? parentWorld : s.StartReferenceMatrix;
-            UpdateParticleMotion(pType, ref s, lifetime, refFrame, out _, out _, out _);
+            UpdateParticleMotion(pType, ref s, lifetime, refFrame, out _, out _, out _, out _);
         }
 
         static Vector3 TransformOffsetAtInit(in Matrix4x4 parentWorld, in Vector3 localOffset, ParticleType pType) {
@@ -283,7 +286,7 @@ namespace WorldBuilder.Shared.Lib {
         }
 
         static void UpdateParticleMotion(ParticleType pType, ref AcParticleSlot s, double lifetime, in Matrix4x4 refFrame,
-            out Vector3 worldPos, out Quaternion worldRot, out float uniformScale) {
+            out Vector3 worldPos, out Quaternion worldRot, out float uniformScale, out float uniformAlpha) {
             DecomposeRigid(refFrame, out var pOrigin, out var pRot);
             float t = (float)lifetime;
             float v26 = lifetime < s.Lifespan ? (float)(lifetime / s.Lifespan) : 1f;
@@ -345,6 +348,9 @@ namespace WorldBuilder.Shared.Lib {
 
             uniformScale = (s.FinalScale - s.StartScale) * v26 + s.StartScale;
             uniformScale = Math.Clamp(uniformScale, 0.05f, 20f);
+
+            uniformAlpha = (s.FinalTrans - s.StartTrans) * v26 + s.StartTrans;
+            uniformAlpha = Math.Clamp(uniformAlpha, 0f, 1f);
         }
 
         static void UpdateParabolicRotated(ref AcParticleSlot s, float t, in Matrix4x4 refFrame,

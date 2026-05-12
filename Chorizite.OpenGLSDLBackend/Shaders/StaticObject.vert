@@ -20,6 +20,8 @@ out vec3 Normal;
 out vec2 TexCoord;
 out float TextureIndex;
 out float LightingFactor;
+out vec3 vWorldPos;
+out float vAlpha;
 
 void main() {
     vec4 worldPos = aInstanceMatrix * vec4(aPosition, 1.0);
@@ -27,5 +29,8 @@ void main() {
     Normal = normalize(mat3(aInstanceMatrix) * aNormal);
     TexCoord = aTexCoord;
     TextureIndex = aTextureIndex;
+    vWorldPos = worldPos.xyz;
     LightingFactor = max(dot(Normal, -uLightDirection), 0.0) + uAmbientIntensity;
+    // aInstanceMatrix[3].w is M44 - 1.0 for all normal objects, per-particle alpha for particles.
+    vAlpha = aInstanceMatrix[3].w;
 }

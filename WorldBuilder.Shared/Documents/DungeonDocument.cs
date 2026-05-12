@@ -139,6 +139,22 @@ namespace WorldBuilder.Shared.Documents {
                 return Task.FromResult(true);
             }
 
+            // ── Pre-export hard validation ─────────────────────────────────────────────
+            // Run full validation and abort on any ERROR-level issue before touching the DAT.
+            // Errors here mean the export would write data that crashes or corrupts the client.
+            var preCheckErrors = ValidateComprehensive()
+                .Where(r => r.Severity == ValidationSeverity.Error)
+                .ToList();
+            if (preCheckErrors.Count > 0) {
+                foreach (var err in preCheckErrors)
+                    _logger.LogError("[DungeonDoc] Validation error: {Msg}", err.Message);
+                _logger.LogError(
+                    "[DungeonDoc] Export aborted: {Count} error(s) must be fixed before exporting. " +
+                    "Use Dungeon Editor → Validate to see all issues.",
+                    preCheckErrors.Count);
+                return Task.FromResult(false);
+            }
+
             uint lbId = LandblockKey;
             uint lbEntryId = (lbId << 16) | 0xFFFF;
             uint lbiId = (lbId << 16) | 0xFFFE;
@@ -202,6 +218,13 @@ namespace WorldBuilder.Shared.Documents {
             // through the EnvCell VisibleCells list (light_list.data in the client),
             // not through BuildingInfo/BuildingPortal stab lists.
             var maxCellNum = Cells.Max(c => c.CellNumber);
+            if (maxCellNum < 0x0100) {
+                // Belt-and-suspenders guard — pre-export validation should have caught this.
+                _logger.LogError(
+                    "[DungeonDoc] maxCellNum 0x{Max:X4} is below 0x0100; NumCells would underflow. Aborting.",
+                    maxCellNum);
+                return Task.FromResult(false);
+            }
             lbi.NumCells = (uint)(maxCellNum - 0x00FF);
 
             if (!datwriter.TrySave(lbi, iteration)) {
@@ -769,13 +792,45 @@ namespace WorldBuilder.Shared.Documents {
         }
 
         public ushort AllocateCellNumber() {
-            if (_recycledCellNumbers.Count > 0)
-                return _recycledCellNumbers.Dequeue();
+            // Drain the recycle queue, skipping any numbers that slipped outside the
+            // valid EnvCell range [0x0100, 0xFFFD].
+            while (_recycledCellNumbers.Count > 0) {
+                var recycled = _recycledCellNumbers.Dequeue();
+                if (recycled >= 0x0100 && recycled < 0xFFFE)
+                    return recycled;
+                _logger.LogWarning("[DungeonDoc] Discarded recycled cell number 0x{Num:X4} (outside valid range)", recycled);
+            }
+
+            // Skip the two reserved IDs: 0xFFFE (LandBlockInfo) and 0xFFFF (LandBlock).
+            if (_nextCellNumber == 0xFFFE || _nextCellNumber == 0xFFFF)
+                _nextCellNumber = 0;
+
+            // If the ushort has wrapped around into the outdoor/invalid range, we've
+            // exhausted the cell number space. Return 0 as an error sentinel — the
+            // caller will get a "CellNumber < 0x0100" validation error and export aborts.
+            if (_nextCellNumber < 0x0100) {
+                _logger.LogError("[DungeonDoc] Cell number space exhausted — cannot allocate a number in [0x0100, 0xFFFD]");
+                return 0;
+            }
+
             return _nextCellNumber++;
         }
 
+        /// <summary>
+        /// Adds a new cell. Returns the assigned cell number, or 0 if the parameters
+        /// are invalid (the cell is not added in that case).
+        /// </summary>
         public ushort AddCell(ushort environmentId, ushort cellStructure, Vector3 origin, Quaternion orientation, List<ushort> surfaces) {
+            // EnvironmentId 0 means no Environment asset — the client will crash
+            // trying to dereference env->get_cellstruct() on a null pointer.
+            if (environmentId == 0) {
+                _logger.LogWarning("[DungeonDoc] AddCell rejected: EnvironmentId is 0. Select a valid room before placing.");
+                return 0;
+            }
+
             var cellNum = AllocateCellNumber();
+            if (cellNum == 0) return 0; // exhaustion already logged above
+
             var cell = new DungeonCellData {
                 CellNumber = cellNum,
                 EnvironmentId = environmentId,
@@ -819,7 +874,12 @@ namespace WorldBuilder.Shared.Documents {
             }
 
             Cells.Remove(cell);
-            _recycledCellNumbers.Enqueue(cellNumber);
+
+            // Only recycle numbers in the valid EnvCell range so the allocator
+            // never hands out an outdoor LandCell or reserved slot.
+            if (cellNumber >= 0x0100 && cellNumber < 0xFFFE)
+                _recycledCellNumbers.Enqueue(cellNumber);
+
             MarkDirty();
         }
 
@@ -899,6 +959,24 @@ namespace WorldBuilder.Shared.Documents {
         /// <param name="startCellNum">First cell number to use. Pass 0x0100 for empty landblocks,
         /// or a higher value to avoid overwriting existing building cells.</param>
         public void CopyFrom(DungeonDocument source, ushort startCellNum = 0x0100) {
+            // Clamp startCellNum to the valid EnvCell range.
+            if (startCellNum < 0x0100) {
+                _logger.LogWarning(
+                    "[DungeonDoc] CopyFrom: startCellNum 0x{Num:X4} is below 0x0100; clamped to 0x0100",
+                    startCellNum);
+                startCellNum = 0x0100;
+            }
+
+            // Verify the source cells fit within the available cell-number space.
+            uint endRaw = (uint)startCellNum + (uint)source.Cells.Count;
+            if (endRaw > 0xFFFE) {
+                _logger.LogError(
+                    "[DungeonDoc] CopyFrom: source has {Count} cells starting at 0x{Start:X4} which would " +
+                    "overflow into reserved range (≥ 0xFFFE). Aborting copy.",
+                    source.Cells.Count, startCellNum);
+                return;
+            }
+
             Cells.Clear();
             _nextCellNumber = startCellNum;
             _recycledCellNumbers.Clear();
@@ -933,6 +1011,9 @@ namespace WorldBuilder.Shared.Documents {
                     });
                 }
                 foreach (var vc in src.VisibleCells) {
+                    // Skip stale zero entries — they are invalid and poison the client's
+                    // visible-cell hash table (grab_visible_cells → add_visible_cell(0)).
+                    if (vc == 0) continue;
                     dc.VisibleCells.Add(cellMap.TryGetValue(vc, out var mappedVc) ? mappedVc : vc);
                 }
                 foreach (var stab in src.StaticObjects) {
@@ -967,6 +1048,14 @@ namespace WorldBuilder.Shared.Documents {
 
         public List<ValidationResult> ValidateComprehensive() {
             var results = new List<ValidationResult>();
+
+            // ── Landblock key ────────────────────────────────────────────────────────────
+            // LandblockKey == 0 makes the LBI/LandBlock IDs 0x0000FFFE / 0x0000FFFF,
+            // which are reserved system slots. Writing there silently corrupts the DAT.
+            if (LandblockKey == 0)
+                results.Add(new(ValidationSeverity.Error,
+                    "LandblockKey is 0 — dungeon has no landblock assigned. Export would write to reserved DAT slot 0x0000FFFE."));
+
             if (Cells.Count == 0) {
                 results.Add(new(ValidationSeverity.Warning, "Dungeon has no cells."));
                 return results;
@@ -974,13 +1063,54 @@ namespace WorldBuilder.Shared.Documents {
 
             var cellNums = new HashSet<ushort>(Cells.Select(c => c.CellNumber));
 
-            // Duplicate cell numbers
+            // ── Cell number range (from AC client CellManager / 0x100 threshold) ────────
+            // Cell IDs with low-16 < 0x0100 are outdoor land-cells (1–64 = 0x0001–0x0040)
+            // or reserved (0x0041–0x00FF). Writing EnvCell data into those slots corrupts
+            // terrain and can crash the client loader (CellManager::PreFetchCells routes
+            // low-IDs to LScape, high-IDs to CEnvCell — mixing them is fatal).
+            // 0xFFFE / 0xFFFF are the LandBlockInfo and LandBlock records respectively;
+            // overwriting them destroys the block's terrain entry.
+            foreach (var cell in Cells) {
+                if (cell.CellNumber < 0x0100)
+                    results.Add(new(ValidationSeverity.Error,
+                        $"Cell 0x{cell.CellNumber:X4} has a cell number below 0x0100. " +
+                        "The client routes IDs < 0x0100 to the outdoor land-cell pipeline — " +
+                        "this will corrupt terrain data.",
+                        cell.CellNumber));
+                else if (cell.CellNumber == 0xFFFE)
+                    results.Add(new(ValidationSeverity.Error,
+                        "Cell number 0xFFFE is reserved for the LandBlockInfo record — exporting would destroy it.",
+                        cell.CellNumber));
+                else if (cell.CellNumber == 0xFFFF)
+                    results.Add(new(ValidationSeverity.Error,
+                        "Cell number 0xFFFF is reserved for the LandBlock terrain record — exporting would destroy it.",
+                        cell.CellNumber));
+                else if (cell.CellNumber > 0xFEFF)
+                    results.Add(new(ValidationSeverity.Warning,
+                        $"Cell 0x{cell.CellNumber:X4} is close to the reserved range (0xFFFE/0xFFFF). " +
+                        "Consider keeping cell numbers below 0xFF00.",
+                        cell.CellNumber));
+            }
+
+            // ── Environment ID (from CEnvCell::UnPack / CEnvironment::get_cellstruct) ───
+            // EnvironmentId == 0 means there is no Environment asset. The client calls
+            // CEnvironment::get_cellstruct() on it unconditionally; a null env results in
+            // a null-pointer dereference inside find_env_collisions and point_in_cell.
+            foreach (var cell in Cells) {
+                if (cell.EnvironmentId == 0)
+                    results.Add(new(ValidationSeverity.Error,
+                        $"Cell 0x{cell.CellNumber:X4} has EnvironmentId 0. " +
+                        "The client will crash dereferencing the null environment pointer.",
+                        cell.CellNumber));
+            }
+
+            // ── Duplicate cell numbers ────────────────────────────────────────────────
             var dupes = Cells.GroupBy(c => c.CellNumber).Where(g => g.Count() > 1);
             foreach (var dupe in dupes)
                 results.Add(new(ValidationSeverity.Error,
                     $"Duplicate cell number 0x{dupe.Key:X4} ({dupe.Count()} cells)", dupe.Key));
 
-            // Orphaned portal references
+            // ── Orphaned portal references ────────────────────────────────────────────
             foreach (var cell in Cells) {
                 foreach (var portal in cell.CellPortals) {
                     if (portal.OtherCellId != 0 && portal.OtherCellId != 0xFFFF &&
@@ -992,7 +1122,7 @@ namespace WorldBuilder.Shared.Documents {
                 }
             }
 
-            // One-way portals (A→B exists but B→A doesn't)
+            // ── One-way portals (A→B exists but B→A doesn't) ─────────────────────────
             foreach (var cell in Cells) {
                 foreach (var portal in cell.CellPortals) {
                     var other = GetCell(portal.OtherCellId);
@@ -1004,7 +1134,29 @@ namespace WorldBuilder.Shared.Documents {
                 }
             }
 
-            // Disconnected cells (unreachable from first cell)
+            // ── OtherPortalId out-of-bounds (from CEnvCell::find_transit_cells) ───────
+            // The client uses OtherPortalId as a direct array index into the target cell's
+            // portals[] array (CCellPortal::GetOtherCell). If the index >= portals.Count
+            // the client reads garbage or crashes. RewriteOtherPortalIndices will fix this
+            // on export, but flag it so users know their portal data is inconsistent.
+            var cellByNum = new Dictionary<ushort, DungeonCellData>();
+            foreach (var c in Cells)
+                cellByNum.TryAdd(c.CellNumber, c); // safe with duplicates; duplicates already flagged above
+            foreach (var cell in Cells) {
+                foreach (var portal in cell.CellPortals) {
+                    if (portal.OtherCellId == 0xFFFF || portal.OtherCellId == 0) continue;
+                    if (!cellByNum.TryGetValue(portal.OtherCellId, out var targetCell)) continue;
+                    if (portal.OtherPortalId >= targetCell.CellPortals.Count && targetCell.CellPortals.Count > 0)
+                        results.Add(new(ValidationSeverity.Warning,
+                            $"Cell 0x{cell.CellNumber:X4} → 0x{portal.OtherCellId:X4}: " +
+                            $"OtherPortalId {portal.OtherPortalId} is out of range " +
+                            $"(target has {targetCell.CellPortals.Count} portal(s)). " +
+                            "Will be rewritten on export.",
+                            cell.CellNumber));
+                }
+            }
+
+            // ── Disconnected cells (unreachable from first cell) ──────────────────────
             var visited = new HashSet<ushort>();
             var queue = new Queue<ushort>();
             var firstCell = Cells[0].CellNumber;
@@ -1026,7 +1178,7 @@ namespace WorldBuilder.Shared.Documents {
                         cell.CellNumber));
             }
 
-            // Missing surfaces
+            // ── Missing surfaces ──────────────────────────────────────────────────────
             foreach (var cell in Cells) {
                 if (cell.Surfaces.Count == 0)
                     results.Add(new(ValidationSeverity.Warning,
@@ -1034,13 +1186,26 @@ namespace WorldBuilder.Shared.Documents {
                         cell.CellNumber));
             }
 
-            // Empty VisibleCells
+            // ── Zero entries in VisibleCells (from CEnvCell::grab_visible_cells) ──────
+            // stab_list[i] == 0 causes the client to call add_visible_cell(0), which hashes
+            // to bucket 0 and silently poisons the visible-cell table with a null entry.
+            // grab_visible_cells then tries to back-link the null cell to the owning landblock,
+            // which is a null-pointer write.
+            foreach (var cell in Cells) {
+                if (cell.VisibleCells.Any(vc => vc == 0))
+                    results.Add(new(ValidationSeverity.Warning,
+                        $"Cell 0x{cell.CellNumber:X4} has a zero entry in VisibleCells. " +
+                        "This poisons the client's visible-cell hash table.",
+                        cell.CellNumber));
+            }
+
+            // ── Empty VisibleCells ────────────────────────────────────────────────────
             int emptyStabs = Cells.Count(c => c.VisibleCells.Count == 0);
             if (emptyStabs > 0)
                 results.Add(new(ValidationSeverity.Info,
-                    $"{emptyStabs} cell(s) have empty VisibleCells — use Compute Visibility before export"));
+                    $"{emptyStabs} cell(s) have empty VisibleCells — auto-computed on export if still empty"));
 
-            // Summary
+            // ── Summary ───────────────────────────────────────────────────────────────
             if (results.Count == 0)
                 results.Add(new(ValidationSeverity.Info,
                     $"All {Cells.Count} cells passed validation."));

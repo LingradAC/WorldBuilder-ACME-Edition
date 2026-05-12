@@ -22,7 +22,11 @@ namespace WorldBuilder.Editors.Landscape {
         public IShader SphereShader { get; }
         public IShader GizmoShader { get; }
         public IShader PreviewShader { get; }
+        public IShader SkyShader { get; }
         public TransformGizmo Gizmo { get; }
+
+        public uint SkyVAO { get; private set; }
+        public uint SkyVBO { get; private set; }
 
         public uint PreviewVAO { get; set; }
         public uint PreviewVBO { get; set; }
@@ -78,7 +82,12 @@ namespace WorldBuilder.Editors.Landscape {
                 GameScene.GetEmbeddedResource("Chorizite.OpenGLSDLBackend.Shaders.Preview.vert", openGlAssembly),
                 GameScene.GetEmbeddedResource("Chorizite.OpenGLSDLBackend.Shaders.Preview.frag", openGlAssembly));
 
+            SkyShader = renderer.GraphicsDevice.CreateShader("Sky",
+                GameScene.GetEmbeddedResource("Chorizite.OpenGLSDLBackend.Shaders.Sky.vert", openGlAssembly),
+                GameScene.GetEmbeddedResource("Chorizite.OpenGLSDLBackend.Shaders.Sky.frag", openGlAssembly));
+
             InitializeSphereGeometry();
+            InitializeSkyGeometry();
         }
 
         private unsafe void InitializeSphereGeometry() {
@@ -119,6 +128,40 @@ namespace WorldBuilder.Editors.Landscape {
             fixed (uint* iptr = indices) {
                 gl.BufferData(GLEnum.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), iptr,
                     GLEnum.StaticDraw);
+            }
+
+            gl.BindVertexArray(0);
+        }
+
+        private unsafe void InitializeSkyGeometry() {
+            var gl = Renderer.GraphicsDevice.GL;
+            // Full-screen quad in NDC: two triangles covering [-1,1] x [-1,1].
+            // No depth write — sky sits behind everything at z = 0.9999 in the shader.
+            float[] verts = [
+                -1f, -1f,
+                 1f, -1f,
+                 1f,  1f,
+                -1f,  1f,
+            ];
+            uint[] indices = [0u, 1u, 2u, 0u, 2u, 3u];
+
+            gl.GenVertexArrays(1, out uint vao);
+            SkyVAO = vao;
+            gl.BindVertexArray(SkyVAO);
+
+            gl.GenBuffers(1, out uint vbo);
+            SkyVBO = vbo;
+            gl.BindBuffer(GLEnum.ArrayBuffer, SkyVBO);
+            fixed (float* ptr = verts) {
+                gl.BufferData(GLEnum.ArrayBuffer, (nuint)(verts.Length * sizeof(float)), ptr, GLEnum.StaticDraw);
+            }
+            gl.EnableVertexAttribArray(0);
+            gl.VertexAttribPointer(0, 2, GLEnum.Float, false, 2 * sizeof(float), (void*)0);
+
+            gl.GenBuffers(1, out uint ebo);
+            gl.BindBuffer(GLEnum.ElementArrayBuffer, ebo);
+            fixed (uint* ptr = indices) {
+                gl.BufferData(GLEnum.ElementArrayBuffer, (nuint)(indices.Length * sizeof(uint)), ptr, GLEnum.StaticDraw);
             }
 
             gl.BindVertexArray(0);
@@ -222,6 +265,8 @@ namespace WorldBuilder.Editors.Landscape {
             gl.DeleteBuffer(SphereIBO);
             gl.DeleteBuffer(SphereInstanceVBO);
             gl.DeleteVertexArray(SphereVAO);
+            if (SkyVBO != 0) gl.DeleteBuffer(SkyVBO);
+            if (SkyVAO != 0) gl.DeleteVertexArray(SkyVAO);
             if (InstanceVBO != 0) gl.DeleteBuffer(InstanceVBO);
             if (PreviewVBO != 0) gl.DeleteBuffer(PreviewVBO);
             if (PreviewEBO != 0) gl.DeleteBuffer(PreviewEBO);

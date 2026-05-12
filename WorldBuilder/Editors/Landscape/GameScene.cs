@@ -237,6 +237,15 @@ namespace WorldBuilder.Editors.Landscape {
         public float SphereHeightOffset { get; set; } = 0.0f;
         public Vector3 LightDirection { get; set; } = new Vector3(0.5f, 0.3f, -0.3f);
         public float SpecularPower { get; set; } = 32.0f;
+
+        // Sky and atmosphere
+        public Vector3 SkyZenithColor { get; set; } = new Vector3(0.13f, 0.28f, 0.72f);
+        public Vector3 SkyHorizonColor { get; set; } = new Vector3(0.55f, 0.73f, 0.90f);
+
+        // Distance fog (fades terrain and objects toward the horizon color)
+        public bool FogEnabled { get; set; } = true;
+        public float FogStart { get; set; } = 800f;
+        public float FogEnd { get; set; } = 3200f;
         public Vector3 SphereGlowColor { get; set; } = new(0);
         public float SphereGlowIntensity { get; set; } = 1.0f;
         public float SphereGlowPower { get; set; } = 0.5f;
@@ -1707,7 +1716,7 @@ namespace WorldBuilder.Editors.Landscape {
             gl.Enable(EnableCap.DepthTest);
             gl.DepthFunc(DepthFunction.Less);
             gl.DepthMask(true);
-            gl.ClearColor(0.2f, 0.3f, 0.8f, 1.0f);
+            gl.ClearColor(SkyHorizonColor.X, SkyHorizonColor.Y, SkyHorizonColor.Z, 1.0f);
             gl.ClearDepth(1f);
             gl.Clear(
                 ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
@@ -1740,7 +1749,10 @@ namespace WorldBuilder.Editors.Landscape {
             context.EnvCellManager.AlwaysShowBuildingInteriors = ShowBuildingInteriors;
             context.EnvCellManager.ComputeVisibility(viewProjection, camera);
 
-            // Step 1: Terrain. PolygonOffset pushes terrain slightly back so
+            // Step 1: Sky gradient — drawn before terrain, no depth write.
+            RenderSky(context);
+
+            // Step 1b: Terrain. PolygonOffset pushes terrain slightly back so
             // building floors win at equal Z when the camera is outside.
             gl.Enable(EnableCap.PolygonOffsetFill);
             gl.PolygonOffset(1f, 1f);
@@ -1994,6 +2006,10 @@ namespace WorldBuilder.Editors.Landscape {
             objectManager._objectShader.SetUniform("uSpecularPower", SpecularPower);
             objectManager._objectShader.SetUniform("uHighlightColor", new Vector3(1.0f, 0.75f, 0.1f));
             objectManager._objectShader.SetUniform("uHighlightIntensity", pulse);
+            objectManager._objectShader.SetUniform("uFogEnabled", FogEnabled ? 1 : 0);
+            objectManager._objectShader.SetUniform("uFogColor", SkyHorizonColor);
+            objectManager._objectShader.SetUniform("uFogStart", FogStart);
+            objectManager._objectShader.SetUniform("uFogEnd", FogEnd);
 
             var groups = new Dictionary<(uint Id, bool IsSetup), List<Matrix4x4>>();
             foreach (var entry in entries) {
@@ -2171,6 +2187,25 @@ namespace WorldBuilder.Editors.Landscape {
             gl.Disable(EnableCap.Blend);
         }
 
+        private unsafe void RenderSky(SceneContext context) {
+            var gl = context.Renderer.GraphicsDevice.GL;
+            gl.Disable(EnableCap.DepthTest);
+            gl.DepthMask(false);
+            gl.Disable(EnableCap.CullFace);
+
+            context.SkyShader.Bind();
+            context.SkyShader.SetUniform("uZenithColor", SkyZenithColor);
+            context.SkyShader.SetUniform("uHorizonColor", SkyHorizonColor);
+
+            gl.BindVertexArray(context.SkyVAO);
+            gl.DrawElements(GLEnum.Triangles, 6, GLEnum.UnsignedInt, null);
+            gl.BindVertexArray(0);
+
+            gl.Enable(EnableCap.DepthTest);
+            gl.DepthMask(true);
+            gl.Enable(EnableCap.CullFace);
+        }
+
         private void RenderTerrain(
             SceneContext context,
             IEnumerable<(TerrainChunk chunk, ChunkRenderData renderData)> renderableChunks,
@@ -2183,6 +2218,7 @@ namespace WorldBuilder.Editors.Landscape {
 
             context.TerrainShader.Bind();
             context.TerrainShader.SetUniform("xAmbient", AmbientLightIntensity);
+            context.TerrainShader.SetUniform("xLightDirection", Vector3.Normalize(LightDirection));
             context.TerrainShader.SetUniform("xWorld", model);
             context.TerrainShader.SetUniform("xView", camera.GetViewMatrix());
             context.TerrainShader.SetUniform("xProjection", camera.GetProjectionMatrix());
@@ -2212,6 +2248,14 @@ namespace WorldBuilder.Editors.Landscape {
             int previewIdx = editingContext?.PreviewTextureAtlasIndex ?? -1;
             context.TerrainShader.SetUniform("uPreviewActive", previewIdx >= 0 ? 1 : 0);
             context.TerrainShader.SetUniform("uPreviewTexIndex", (float)previewIdx);
+
+            float tanHalfFov = MathF.Tan(WorldBuilder.Lib.MathHelper.DegreesToRadians(PerspectiveCamera.fov * 0.5f));
+            context.TerrainShader.SetUniform("uTanHalfFov", tanHalfFov);
+            context.TerrainShader.SetUniform("uFogEnabled", FogEnabled ? 1 : 0);
+            context.TerrainShader.SetUniform("uFogColor", SkyHorizonColor);
+            context.TerrainShader.SetUniform("uFogStart", FogStart);
+            context.TerrainShader.SetUniform("uFogEnd", FogEnd);
+            context.TerrainShader.SetUniform("uCameraPos2D", new Vector2(camera.Position.X, camera.Position.Y));
 
             SurfaceManager.GetTerrainAtlas(context.Renderer).Bind(0);
             context.TerrainShader.SetUniform("xOverlays", 0);
@@ -2325,6 +2369,10 @@ namespace WorldBuilder.Editors.Landscape {
             objectManager._objectShader.SetUniform("uSpecularPower", SpecularPower);
             objectManager._objectShader.SetUniform("uHighlightColor", Vector3.Zero);
             objectManager._objectShader.SetUniform("uHighlightIntensity", 0f);
+            objectManager._objectShader.SetUniform("uFogEnabled", FogEnabled ? 1 : 0);
+            objectManager._objectShader.SetUniform("uFogColor", SkyHorizonColor);
+            objectManager._objectShader.SetUniform("uFogStart", FogStart);
+            objectManager._objectShader.SetUniform("uFogEnd", FogEnd);
 
             foreach (var list in _objectGroupBuffer.Values) list.Clear();
             for (int i = 0; i < objects.Count; i++) {
@@ -2475,6 +2523,10 @@ namespace WorldBuilder.Editors.Landscape {
             objectManager._objectShader.SetUniform("uSpecularPower", SpecularPower);
             objectManager._objectShader.SetUniform("uHighlightColor", Vector3.Zero);
             objectManager._objectShader.SetUniform("uHighlightIntensity", 0f);
+            objectManager._objectShader.SetUniform("uFogEnabled", FogEnabled ? 1 : 0);
+            objectManager._objectShader.SetUniform("uFogColor", SkyHorizonColor);
+            objectManager._objectShader.SetUniform("uFogStart", FogStart);
+            objectManager._objectShader.SetUniform("uFogEnd", FogEnd);
 
             foreach (var list in _objectGroupBuffer.Values) list.Clear();
             foreach (var obj in objects) {

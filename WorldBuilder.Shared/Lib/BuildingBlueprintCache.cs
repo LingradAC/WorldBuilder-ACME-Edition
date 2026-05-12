@@ -308,7 +308,20 @@ namespace WorldBuilder.Shared.Lib {
 
             // Build cell ID remap table: originalCellId -> newCellId
             var remap = new Dictionary<ushort, ushort>();
-            ushort nextCellId = (ushort)(currentNumCells + 0x0100);
+            uint startCellIdRaw = currentNumCells + 0x0100U;
+
+            // Guard: verify all new cells fit inside [0x0100, 0xFFFD] before writing anything.
+            // ushort overflow would silently wrap into the outdoor LandCell range (0x0001-0x0040)
+            // or the reserved LBI/LandBlock slots (0xFFFE/0xFFFF), corrupting the DAT.
+            if (startCellIdRaw + (uint)blueprint.Cells.Count > 0xFFFE) {
+                logger?.LogError(
+                    "[Blueprint] InstantiateBlueprint: cell ID overflow — block already has {NumCells} cells; " +
+                    "adding {New} more would exceed 0xFFFD. Aborting.",
+                    currentNumCells, blueprint.Cells.Count);
+                return null;
+            }
+
+            ushort nextCellId = (ushort)startCellIdRaw;
             foreach (var cell in blueprint.Cells) {
                 remap[cell.OriginalCellId] = nextCellId;
                 nextCellId++;
